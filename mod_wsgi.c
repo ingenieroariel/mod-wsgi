@@ -2456,6 +2456,7 @@ static void wsgi_log_script_error(request_rec *r, const char *e, const char *n)
 static const char *wsgi_interpreter_name(request_rec *r,
                                          const char *interpreter)
 {
+    const char *name = NULL;
     const char *value = NULL;
 
     const char *h = NULL;
@@ -2474,35 +2475,43 @@ static const char *wsgi_interpreter_name(request_rec *r,
     if (*interpreter != '%')
         return interpreter;
 
-    value = interpreter + 1;
+    name = interpreter + 1;
 
-    if (*value) {
-        if (!strcmp(value, "{RESOURCE}")) {
+    if (*name) {
+        if (!strcmp(name, "{RESOURCE}")) {
             if (p != DEFAULT_HTTP_PORT && p != DEFAULT_HTTPS_PORT)
                 return apr_psprintf(r->pool, "%s:%u|%s", h, p, r->uri);
             else
                 return apr_psprintf(r->pool, "%s|%s", h, r->uri);
         }
 
-        if (!strcmp(value, "{SERVER}")) {
+        if (!strcmp(name, "{SERVER}")) {
             if (p != DEFAULT_HTTP_PORT && p != DEFAULT_HTTPS_PORT)
                 return apr_psprintf(r->pool, "%s:%u", h, p);
             else
                 return h;
         }
 
-        if (!strcmp(value, "{GLOBAL}"))
+        if (!strcmp(name, "{GLOBAL}"))
             return "";
 
-        if (strstr(value, "{ENV:") == value) {
+        if (strstr(name, "{ENV:") == name) {
             int len = 0;
 
-            value = value + 5;
-            len = strlen(value);
+            name = name + 5;
+            len = strlen(name);
 
-            if (len && value[len-1] == '}') {
-                value = apr_pstrndup(r->pool, value, len-1);
-                value = apr_table_get(r->subprocess_env, value);
+            if (len && name[len-1] == '}') {
+                name = apr_pstrndup(r->pool, name, len-1);
+
+                value = apr_table_get(r->notes, name);
+
+                if (!value)
+                    value = apr_table_get(r->subprocess_env, name);
+
+                if (!value)
+                    value = getenv(name);
+
                 if (value)
                     return value;
             }
@@ -2514,6 +2523,7 @@ static const char *wsgi_interpreter_name(request_rec *r,
 
 static const char *wsgi_callable_name(request_rec *r, const char *callable)
 {
+    const char *name = NULL;
     const char *value = NULL;
 
     if (!callable)
@@ -2522,20 +2532,28 @@ static const char *wsgi_callable_name(request_rec *r, const char *callable)
     if (*callable != '%')
         return callable;
 
-    value = callable + 1;
+    name = callable + 1;
 
-    if (!*value)
+    if (!*name)
         return "application";
 
-    if (strstr(value, "{ENV:") == value) {
+    if (strstr(name, "{ENV:") == name) {
         int len = 0;
 
-        value = value + 5;
-        len = strlen(value);
+        name = name + 5;
+        len = strlen(name);
 
-        if (len && value[len-1] == '}') {
-            value = apr_pstrndup(r->pool, value, len-1);
-            value = apr_table_get(r->subprocess_env, value);
+        if (len && name[len-1] == '}') {
+            name = apr_pstrndup(r->pool, name, len-1);
+
+            value = apr_table_get(r->notes, name);
+
+            if (!value)
+                value = apr_table_get(r->subprocess_env, name);
+
+            if (!value)
+                value = getenv(name);
+
             if (value)
                 return value;
         }
