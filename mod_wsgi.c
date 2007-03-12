@@ -1211,13 +1211,6 @@ static PyObject *Adapter_environ(AdapterObject *self)
     const char *scheme = NULL;
 #endif
 
-    WSGIServerConfig *sconfig = NULL;
-    WSGIServerConfig *dconfig = NULL;
-    const char *interpreter = NULL;
-    const char *callable = NULL;
-    int reloading = -1;
-    int buffering = -1;
-
     /* Create the WSGI environment dictionary. */
 
     environ = PyDict_New();
@@ -1354,6 +1347,24 @@ static PyObject *Adapter_environ(AdapterObject *self)
 
     object = (PyObject *)newInputObject(r);
     PyDict_SetItemString(environ, "wsgi.input", object);
+    Py_DECREF(object);
+
+    /* Now setup some mod_wsgi specific environment values. */
+
+    object = PyString_FromString(self->interpreter);
+    PyDict_SetItemString(environ, "mod_wsgi.application_group", object);
+    Py_DECREF(object);
+
+    object = PyString_FromString(self->callable);
+    PyDict_SetItemString(environ, "mod_wsgi.script_callable", object);
+    Py_DECREF(object);
+
+    object = PyBool_FromLong(self->reloading);
+    PyDict_SetItemString(environ, "mod_wsgi.script_reloading", object);
+    Py_DECREF(object);
+
+    object = PyBool_FromLong(self->buffering);
+    PyDict_SetItemString(environ, "mod_wsgi.output_buffering", object);
     Py_DECREF(object);
 
     return environ;
