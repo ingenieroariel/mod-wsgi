@@ -52,6 +52,7 @@ typedef table_entry apr_table_entry_t;
 typedef int apr_size_t;
 #define apr_psprintf ap_psprintf
 #define apr_pstrndup ap_pstrndup
+#define apr_pstrdup ap_pstrdup
 #define apr_pstrcat ap_pstrcat
 #define apr_pcalloc ap_pcalloc
 typedef time_t apr_time_t;
@@ -1123,7 +1124,7 @@ static int Adapter_output(AdapterObject *self,
 
             if (!strcasecmp(name, "Content-Type")) {
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
-                self->r->content_type = ap_pstrdup(self->r->pool, value);
+                self->r->content_type = apr_pstrdup(self->r->pool, value);
 #else
                 ap_set_content_type(self->r, value);
 #endif
@@ -1232,57 +1233,6 @@ static PyObject *Adapter_environ(AdapterObject *self)
             else
                 PyDict_SetItemString(environ, elts[i].key, Py_None);
         }
-    }
-
-    /*
-     * Add in authorization headers which Apache leaves out of
-     * CGI environment due to security concerns. WSGI still
-     * needs to see these otherwise it cannot implement any of
-     * the standard authentication schemes such as Basic and
-     * Digest.
-     */
-
-    value = apr_table_get(r->headers_in, "Authorization");
-    if (value) {
-        object = PyString_FromString(value);
-        PyDict_SetItemString(environ, "HTTP_AUTHORIZATION", object);
-        Py_DECREF(object);
-    }
-
-    value = apr_table_get(r->headers_in, "Proxy-Authorization");
-    if (value) {
-        object = PyString_FromString(value);
-        PyDict_SetItemString(environ, "HTTP_PROXY_AUTHORIZATION", object);
-        Py_DECREF(object);
-    }
-
-    /* Fixup SCRIPT_NAME and PATH_INFO to match WSGI requirements. */
-
-    if (!strcmp(r->uri, "/")) {
-        if (r->path_info && *r->path_info) {
-            object = PyString_FromString("");
-            PyDict_SetItemString(environ, "SCRIPT_NAME", object);
-            Py_DECREF(object);
-
-            value = apr_pstrcat(r->pool, r->uri, r->path_info, NULL);
-            object = PyString_FromString(value);
-            PyDict_SetItemString(environ, "PATH_INFO", object);
-            Py_DECREF(object);
-        }
-        else {
-            object = PyString_FromString("");
-            PyDict_SetItemString(environ, "SCRIPT_NAME", object);
-            Py_DECREF(object);
-
-            object = PyString_FromString("/");
-            PyDict_SetItemString(environ, "PATH_INFO", object);
-            Py_DECREF(object);
-        }
-    }
-    else if (!r->path_info || !*r->path_info) {
-        object = PyString_FromString("");
-        PyDict_SetItemString(environ, "PATH_INFO", object);
-        Py_DECREF(object);
     }
 
     /* Now setup all the WSGI specific environment values. */
@@ -2464,6 +2414,60 @@ static void wsgi_log_script_error(request_rec *r, const char *e, const char *n)
 #endif
 }
 
+static void wsgi_build_environment(request_rec *r)
+{
+    const char *value = NULL;
+    const char *script_name = NULL;
+    const char *path_info = NULL;
+
+    /* Populate environment with standard CGI variables. */
+
+    ap_add_cgi_vars(r);
+    ap_add_common_vars(r);
+
+    /*
+     * Add in authorization headers which Apache leaves out of
+     * CGI environment due to security concerns. WSGI still
+     * needs to see these otherwise it cannot implement any of
+     * the standard authentication schemes such as Basic and
+     * Digest.
+     */
+
+    value = apr_table_get(r->headers_in, "Authorization");
+    if (value)
+        apr_table_setn(r->subprocess_env, "HTTP_AUTHORIZATION", value);
+
+    value = apr_table_get(r->headers_in, "Proxy-Authorization");
+    if (value)
+        apr_table_setn(r->subprocess_env, "HTTP_PROXY_AUTHORIZATION", value);
+
+    /* If PATH_INFO not set, set it to an empty string. */
+
+    value = apr_table_get(r->subprocess_env, "PATH_INFO");
+    if (!value)
+        apr_table_setn(r->subprocess_env, "PATH_INFO", "");
+
+    /*
+     * On Apache 1.3, multiple slashes are not collapsed into a
+     * single slash in the REQUEST_URI. These duplicates get
+     * propogated through to SCRIPT_NAME. Thus need to collapse
+     * any duplicate slashes into a single slash. Note that we
+     * don't remove any duplicate slashes in PATH_INFO and as
+     * such any WSGI application must be able to deal with
+     * those.
+     */
+
+    script_name = apr_table_get(r->subprocess_env, "SCRIPT_NAME");
+
+    if (*script_name) {
+        while (*script_name && (*(script_name+1) == '/'))
+            script_name++;
+        script_name = apr_pstrdup(r->pool, script_name);
+        ap_no2slash((char*)script_name);
+        apr_table_setn(r->subprocess_env, "SCRIPT_NAME", script_name);
+    }
+}
+
 static const char *wsgi_interpreter_name(request_rec *r,
                                          const char *interpreter)
 {
@@ -2472,15 +2476,17 @@ static const char *wsgi_interpreter_name(request_rec *r,
 
     const char *h = NULL;
     apr_port_t p = 0;
-
-    h = r->server->server_hostname;
-    p = ap_get_server_port(r);
+    const char *s = NULL;
 
     if (!interpreter) {
+        h = r->server->server_hostname;
+        p = ap_get_server_port(r);
+        s = apr_table_get(r->subprocess_env, "SCRIPT_NAME");
+
         if (p != DEFAULT_HTTP_PORT && p != DEFAULT_HTTPS_PORT)
-            return apr_psprintf(r->pool, "%s:%u|%s", h, p, r->uri);
+            return apr_psprintf(r->pool, "%s:%u|%s", h, p, s);
         else
-            return apr_psprintf(r->pool, "%s|%s", h, r->uri);
+            return apr_psprintf(r->pool, "%s|%s", h, s);
     }
 
     if (*interpreter != '%')
@@ -2490,13 +2496,20 @@ static const char *wsgi_interpreter_name(request_rec *r,
 
     if (*name) {
         if (!strcmp(name, "{RESOURCE}")) {
+            h = r->server->server_hostname;
+            p = ap_get_server_port(r);
+            s = apr_table_get(r->subprocess_env, "SCRIPT_NAME");
+
             if (p != DEFAULT_HTTP_PORT && p != DEFAULT_HTTPS_PORT)
-                return apr_psprintf(r->pool, "%s:%u|%s", h, p, r->uri);
+                return apr_psprintf(r->pool, "%s:%u|%s", h, p, s);
             else
-                return apr_psprintf(r->pool, "%s|%s", h, r->uri);
+                return apr_psprintf(r->pool, "%s|%s", h, s);
         }
 
         if (!strcmp(name, "{SERVER}")) {
+            h = r->server->server_hostname;
+            p = ap_get_server_port(r);
+
             if (p != DEFAULT_HTTP_PORT && p != DEFAULT_HTTPS_PORT)
                 return apr_psprintf(r->pool, "%s:%u", h, p);
             else
@@ -2683,10 +2696,9 @@ static int wsgi_hook_handler(request_rec *r)
     dconfig = ap_get_module_config(r->per_dir_config, &wsgi_module);
     sconfig = ap_get_module_config(r->server->module_config, &wsgi_module);
 
-    /* Populate CGI environment as directives can reference these. */
+    /* Build the sub process environment. */
 
-    ap_add_cgi_vars(r);
-    ap_add_common_vars(r);
+    wsgi_build_environment(r);
 
     /* Determine values of configuration settings. */
 
