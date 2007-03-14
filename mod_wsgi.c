@@ -73,7 +73,9 @@ typedef regmatch_t ap_regmatch_t;
 #endif
 #endif
 
-#include <Python.h>
+#include "Python.h"
+#include "compile.h"
+#include "node.h"
 
 /* Version information. */
 
