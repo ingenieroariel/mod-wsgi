@@ -2454,18 +2454,17 @@ static void wsgi_build_environment(request_rec *r)
         apr_table_setn(r->subprocess_env, "PATH_INFO", "");
 
     /*
-     * On Apache 1.3, multiple slashes are not collapsed into a
-     * single slash in SCRIPT_NAME and PATH_INFO. In Apache 2.X
-     * these multiple slashes do get collapsed. Because some
-     * WSGI applications don't deal with multiple slashes
-     * properly we collapse any duplicate slashes to a single
-     * slash so Apache behaviour is consistent across all
-     * versions. We don't care that PATH_TRANSLATED can on
-     * Apache 1.3 still contain multiple slashes as that should
-     * not be getting used from a WSGI application anyway.
+     * Multiple slashes are not always collapsed into a single
+     * slash in SCRIPT_NAME and PATH_INFO with Apache 1.3 and
+     * Apache 2.X behaving a bit differently. Because some WSGI
+     * applications don't deal with multiple slashes properly we
+     * collapse any duplicate slashes to a single slash so
+     * Apache behaviour is consistent across all versions. We
+     * don't care that PATH_TRANSLATED can on Apache 1.3 still
+     * contain multiple slashes as that should not be getting
+     * used from a WSGI application anyway.
      */
 
-#if AP_SERVER_MAJORVERSION_NUMBER < 2
     script_name = apr_table_get(r->subprocess_env, "SCRIPT_NAME");
 
     if (*script_name) {
@@ -2485,7 +2484,6 @@ static void wsgi_build_environment(request_rec *r)
         ap_no2slash((char*)path_info);
         apr_table_setn(r->subprocess_env, "PATH_INFO", path_info);
     }
-#endif
 }
 
 static const char *wsgi_interpreter_name(request_rec *r,
