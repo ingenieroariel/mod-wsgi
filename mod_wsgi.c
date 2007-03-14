@@ -1919,10 +1919,16 @@ static apr_status_t wsgi_python_child_cleanup(void *data)
                 PySys_SetObject("exitfunc", (PyObject *)NULL);
                 res = PyEval_CallObject(exitfunc, (PyObject *)NULL);
                 if (res == NULL) {
-                    if (!PyErr_ExceptionMatches(PyExc_SystemExit)) {
-                        PySys_WriteStderr("Error in sys.exitfunc:\n");
+                    if (PyErr_ExceptionMatches(PyExc_SystemExit)) {
+                        PySys_WriteStderr("Function sys.exitfunc() raised "
+                                          "SystemExit exception");
+                        PyErr_Clear();
+                        fflush(stderr);
                     }
-                    PyErr_Print();
+                    else {
+                        PyErr_Print();
+                        fflush(stderr);
+                    }
                 }
                 Py_DECREF(exitfunc);
             }
@@ -2792,8 +2798,16 @@ static int wsgi_hook_handler(request_rec *r)
     }
 
     if (PyErr_Occurred()) {
-        PyErr_Print();
-        fflush(stderr);
+        if (PyErr_ExceptionMatches(PyExc_SystemExit)) {
+            wsgi_log_script_error(r, "Target wsgi script raised SystemExit "
+                                  "exception", r->filename);
+            PyErr_Clear();
+            fflush(stderr);
+        }
+        else {
+            PyErr_Print();
+            fflush(stderr);
+        }
     }
 
     Py_XDECREF(module);
