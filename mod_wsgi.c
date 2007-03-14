@@ -2449,14 +2449,17 @@ static void wsgi_build_environment(request_rec *r)
 
     /*
      * On Apache 1.3, multiple slashes are not collapsed into a
-     * single slash in the REQUEST_URI. These duplicates get
-     * propogated through to SCRIPT_NAME. Thus need to collapse
-     * any duplicate slashes into a single slash. Note that we
-     * don't remove any duplicate slashes in PATH_INFO and as
-     * such any WSGI application must be able to deal with
-     * those.
+     * single slash in SCRIPT_NAME and PATH_INFO. In Apache 2.X
+     * these multiple slashes do get collapsed. Because some
+     * WSGI applications don't deal with multiple slashes
+     * properly we collapse any duplicate slashes to a single
+     * slash so Apache behaviour is consistent across all
+     * versions. We don't care that PATH_TRANSLATED can on
+     * Apache 1.3 still contain multiple slashes as that should
+     * not be getting used from a WSGI application anyway.
      */
 
+#if AP_SERVER_MAJORVERSION_NUMBER < 2
     script_name = apr_table_get(r->subprocess_env, "SCRIPT_NAME");
 
     if (*script_name) {
@@ -2466,6 +2469,17 @@ static void wsgi_build_environment(request_rec *r)
         ap_no2slash((char*)script_name);
         apr_table_setn(r->subprocess_env, "SCRIPT_NAME", script_name);
     }
+
+    path_info = apr_table_get(r->subprocess_env, "PATH_INFO");
+
+    if (*path_info) {
+        while (*path_info && (*(path_info+1) == '/'))
+            path_info++;
+        path_info = apr_pstrdup(r->pool, path_info);
+        ap_no2slash((char*)path_info);
+        apr_table_setn(r->subprocess_env, "PATH_INFO", path_info);
+    }
+#endif
 }
 
 static const char *wsgi_interpreter_name(request_rec *r,
