@@ -47,6 +47,8 @@ typedef unsigned int apr_port_t;
 #define apr_table_elts ap_table_elts
 #define apr_array_make ap_make_array
 #define apr_array_push ap_push_array
+#define apr_array_cat ap_array_cat
+#define apr_array_append ap_append_arrays
 typedef array_header apr_array_header_t;
 typedef table_entry apr_table_entry_t;
 typedef int apr_size_t;
@@ -2099,6 +2101,18 @@ static void *wsgi_merge_server_config(apr_pool_t *p, void *base_conf,
     parent = (WSGIServerConfig *)base_conf;
     child = (WSGIServerConfig *)new_conf;
 
+    if (child->aliases && parent->aliases) {
+        config->aliases = apr_array_append(p, child->aliases, parent->aliases);
+    }
+    else if (child->aliases) {
+        config->aliases = apr_array_make(p, 20, sizeof(WSGIAliasEntry));
+        apr_array_cat(config->aliases, child->aliases);
+    }
+    else if (parent->aliases) {
+        config->aliases = apr_array_make(p, 20, sizeof(WSGIAliasEntry));
+        apr_array_cat(config->aliases, parent->aliases);
+    }
+
     if (child->interpreter)
         config->interpreter = child->interpreter;
     else
@@ -2827,7 +2841,7 @@ void wsgi_hook_init(server_rec *s, apr_pool_t *p)
 {
     char package[128];
 
-    sprintf(package, "mod_wsgi/%d.%d", MOD_WSGI_MAJORVERSION_NUMBER,
+    sprintf(package, "mod_wsgi/%d.%d-TRUNK", MOD_WSGI_MAJORVERSION_NUMBER,
             MOD_WSGI_MINORVERSION_NUMBER);
 
     ap_add_version_component(package);
@@ -2907,7 +2921,7 @@ static int wsgi_hook_init(apr_pool_t *pconf, apr_pool_t *ptemp,
 {
     char package[128];
 
-    sprintf(package, "mod_wsgi/%d.%d", MOD_WSGI_MAJORVERSION_NUMBER,
+    sprintf(package, "mod_wsgi/%d.%d-TRUNK", MOD_WSGI_MAJORVERSION_NUMBER,
             MOD_WSGI_MINORVERSION_NUMBER);
 
     ap_add_version_component(pconf, package);
