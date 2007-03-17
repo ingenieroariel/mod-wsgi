@@ -1683,6 +1683,8 @@ static PyThreadState *wsgi_acquire_interpreter(const char *name)
 
         PyModule_AddObject(module, "signal", PyCFunction_New(
                            &wsgi_signal_method[0], NULL));
+
+        Py_DECREF(module);
     }
 
     /* Create thread state object if needed. */
@@ -2057,6 +2059,8 @@ static void wsgi_python_child_init(apr_pool_t *p)
 
     PyModule_AddObject(module, "signal", PyCFunction_New(
                        &wsgi_signal_method[0], NULL));
+
+    Py_DECREF(module);
 
     /* Restore the prior thread state and release the GIL. */
 
