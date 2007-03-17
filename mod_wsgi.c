@@ -1685,6 +1685,17 @@ static PyThreadState *wsgi_acquire_interpreter(const char *name)
                            &wsgi_signal_method[0], NULL));
 
         Py_DECREF(module);
+
+        /*
+         * Set sys.argv to empty array to fake out modules that
+         * look there for Python command line arguments.
+         */
+
+        module = PyImport_ImportModule("sys");
+
+        PyModule_AddObject(module, "argv", PyList_New(0));
+
+        Py_DECREF(module);
     }
 
     /* Create thread state object if needed. */
@@ -2059,6 +2070,17 @@ static void wsgi_python_child_init(apr_pool_t *p)
 
     PyModule_AddObject(module, "signal", PyCFunction_New(
                        &wsgi_signal_method[0], NULL));
+
+    Py_DECREF(module);
+
+    /*
+     * Set sys.argv to empty array to fake out modules that
+     * look there for Python command line arguments.
+     */
+
+    module = PyImport_ImportModule("sys");
+
+    PyModule_AddObject(module, "argv", PyList_New(0));
 
     Py_DECREF(module);
 
