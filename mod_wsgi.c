@@ -1060,7 +1060,7 @@ static PyObject *Adapter_start(AdapterObject *self, PyObject *args)
         return NULL;
     }
 
-    if (exc_info) {
+    if (exc_info && exc_info != Py_None) {
         if (self->status != -1 && !self->headers) {
             PyObject *type = NULL;
             PyObject *value = NULL;
