@@ -2038,7 +2038,7 @@ static void wsgi_python_child_init(apr_pool_t *p)
 
     wsgi_interpreters = PyDict_New();
 
-#ifdef APR_HAS_THREADS
+#if APR_HAS_THREADS
     apr_thread_mutex_create(&wsgi_interp_lock, APR_THREAD_MUTEX_UNNESTED, p);
     apr_thread_mutex_create(&wsgi_module_lock, APR_THREAD_MUTEX_UNNESTED, p);
 #endif
