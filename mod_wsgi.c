@@ -132,6 +132,7 @@ static WSGIServerConfig *newWSGIServerConfig(apr_pool_t *p)
 typedef struct {
         PyObject_HEAD
         request_rec *r;
+        char *s;
 } LogObject;
 
 static PyTypeObject Log_Type;
@@ -145,12 +146,36 @@ static LogObject *newLogObject(request_rec *r)
         return NULL;
 
     self->r = r;
+    self->s = NULL;
 
     return self;
 }
 
 static void Log_dealloc(LogObject *self)
 {
+    if (self->s) {
+        if (self->r) {
+#if AP_SERVER_MAJORVERSION_NUMBER < 2
+            ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR,
+                          self->r, "%s", self->s);
+#else
+            ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR,
+                          0, self->r, "%s", self->s);
+#endif
+        }
+        else {
+#if AP_SERVER_MAJORVERSION_NUMBER < 2
+            ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR,
+                          0, "%s", self->s);
+#else
+            ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR,
+                          0, 0, "%s", self->s);
+#endif
+        }
+
+        free(self->s);
+    }
+
     PyObject_Del(self);
 }
 
@@ -159,27 +184,141 @@ static PyObject *Log_flush(LogObject *self, PyObject *args)
     if (!PyArg_ParseTuple(args, ":flush"))
         return NULL;
 
+    if (self->s) {
+        if (self->r) {
+#if AP_SERVER_MAJORVERSION_NUMBER < 2
+            ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR,
+                          self->r, "%s", self->s);
+#else
+            ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR,
+                          0, self->r, "%s", self->s);
+#endif
+        }
+        else {
+#if AP_SERVER_MAJORVERSION_NUMBER < 2
+            ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR,
+                          0, "%s", self->s);
+#else
+            ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR,
+                          0, 0, "%s", self->s);
+#endif
+        }
+
+        free(self->s);
+        self->s = NULL;
+    }
+
     Py_INCREF(Py_None);
     return Py_None;
 }
 
 static void Log_output(LogObject *self, const char *msg)
 {
-    const char *s = NULL;
+    const char *p = NULL;
+    const char *q = NULL;
 
-    s = ap_getword_nulls(self->r->pool, &msg, '\n');
+    p = msg;
 
-    while (1) {
+    q = strchr(p, '\n');
+
+    while (q) {
+        /* Output each complete line. */
+
+        if (self->s) {
+            /* Need to join with buffered value. */
+
+            int m = 0;
+            int n = 0;
+            char *s = NULL;
+
+            m = strlen(self->s);
+            n = m+q-p+1;
+
+            s = (char *)malloc(n);
+            strncpy(s, self->s, m);
+            strncpy(s+m, p, q-p);
+            s[n] = '\0';
+
+            if (self->r) {
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
-        ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR, self->r, "%s", s);
+                ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR,
+                              self->r, "%s", s);
 #else
-        ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR, 0, self->r, "%s", s);
+                ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR,
+                              0, self->r, "%s", s);
 #endif
+            }
+            else {
+#if AP_SERVER_MAJORVERSION_NUMBER < 2
+                ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR,
+                              0, "%s", s);
+#else
+                ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR,
+                              0, 0, "%s", s);
+#endif
+            }
 
-        if (!*msg)
-            break;
+            free(self->s);
+            self->s = NULL;
 
-        s = ap_getword_nulls(self->r->pool, &msg, '\n');
+            free(s);
+        }
+        else {
+            int n = 0;
+            char *s = NULL;
+
+            n = q-p+1;
+
+            s = (char *)malloc(n);
+            strncpy(s, p, q-p);
+            s[n] = '\0';
+
+            if (self->r) {
+#if AP_SERVER_MAJORVERSION_NUMBER < 2
+                ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR,
+                              self->r, "%s", s);
+#else
+                ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR,
+                              0, self->r, "%s", s);
+#endif
+            }
+            else {
+#if AP_SERVER_MAJORVERSION_NUMBER < 2
+                ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR,
+                              0, "%s", s);
+#else
+                ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR,
+                              0, 0, "%s", s);
+#endif
+            }
+
+            free(s);
+        }
+
+        p = q+1;
+        q = strchr(p, '\n');
+    }
+
+    if (*p) {
+        /* Save away incomplete line. */
+
+        if (self->s) {
+            /* Need to join with buffered value. */
+
+            int m = 0;
+            int n = 0;
+
+            m = strlen(self->s);
+            n = strlen(p);
+
+            self->s = (char *)realloc(self->s, m+n+1);
+            strncpy(self->s+m, p, n);
+            self->s[m+n] = '\0';
+        }
+        else {
+            self->s = (char *)malloc(strlen(p)+1);
+            strcpy(self->s, p);
+        }
     }
 }
 
@@ -190,7 +329,8 @@ static PyObject *Log_write(LogObject *self, PyObject *args)
     if (!PyArg_ParseTuple(args, "s:write", &msg))
         return NULL;
 
-    Log_output(self, msg);
+    if (*msg)
+        Log_output(self, msg);
 
     Py_INCREF(Py_None);
     return Py_None;
@@ -1008,6 +1148,7 @@ typedef struct {
         int status;
         PyObject *headers;
         PyObject *sequence;
+        LogObject *log;
 } AdapterObject;
 
 static PyTypeObject Adapter_Type;
@@ -1030,6 +1171,7 @@ static AdapterObject *newAdapterObject(request_rec *r, const char *interpreter,
     self->status = -1;
     self->headers = NULL;
     self->sequence = NULL;
+    self->log = NULL;
 
     return self;
 }
@@ -1038,6 +1180,7 @@ static void Adapter_dealloc(AdapterObject *self)
 {
     Py_XDECREF(self->headers);
     Py_XDECREF(self->sequence);
+    Py_XDECREF(self->log);
 
     PyObject_Del(self);
 }
@@ -1291,11 +1434,15 @@ static PyObject *Adapter_environ(AdapterObject *self)
         Py_DECREF(object);
     }
 
-    /* Setup log object for WSGI errors. */
+    /*
+     * Setup log object for WSGI errors. Don't decrement
+     * reference to log object as keep reference to it.
+     */
 
-    object = (PyObject *)newLogObject(r);
+    self->log = newLogObject(r);
+
+    object = (PyObject *)self->log;
     PyDict_SetItemString(environ, "wsgi.errors", object);
-    Py_DECREF(object);
 
     /* Setup input object for request content. */
 
