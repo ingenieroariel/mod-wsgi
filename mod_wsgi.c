@@ -1954,8 +1954,11 @@ static PyObject *wsgi_load_source(const char *name, const char* pathname)
     return m;
 }
 
-static PyObject *wsgi_import_script(request_rec *r, int reloading)
+static PyObject *wsgi_import_script(request_rec *r, int reloading,
+                                    const char *interpreter)
 {
+    int found = 0;
+
     PyObject *module = NULL;
 
     char *hash = NULL;
@@ -1988,6 +1991,9 @@ static PyObject *wsgi_import_script(request_rec *r, int reloading)
     modules = PyImport_GetModuleDict();
     module = PyDict_GetItemString(modules, name);
 
+    if (module)
+        found = 1;
+
     /*
      * If module reloading is enabled and the module exists, see
      * if it has been modified since the last time it was
@@ -2004,7 +2010,7 @@ static PyObject *wsgi_import_script(request_rec *r, int reloading)
         apr_time_t mtime = 0;
 
         dict = PyModule_GetDict(module);
-        object = PyDict_GetItemString(dict, "__mod_wsgi_mtime__");
+        object = PyDict_GetItemString(dict, "__mtime__");
 
         if (object) {
             mtime = PyLong_AsLongLong(object);
@@ -2027,6 +2033,33 @@ static PyObject *wsgi_import_script(request_rec *r, int reloading)
     }
 
     if (!module) {
+        if (found) {
+#if AP_SERVER_MAJORVERSION_NUMBER < 2
+            ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0,
+                         "mod_wsgi (pid=%d, group='%s'): "
+                         "Reloading script '%s'.", getpid(),
+                         interpreter, r->filename);
+#else
+            ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, 0,
+                         "mod_wsgi (pid=%d, group='%s'): "
+                         "Reloading script '%s'.", getpid(),
+                         interpreter, r->filename);
+#endif
+        }
+        else {
+#if AP_SERVER_MAJORVERSION_NUMBER < 2
+            ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0,
+                         "mod_wsgi (pid=%d, group='%s'): "
+                         "Loading script '%s'.", getpid(),
+                         interpreter, r->filename);
+#else
+            ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, 0,
+                         "mod_wsgi (pid=%d, group='%s'): "
+                         "Loading script '%s'.", getpid(),
+                         interpreter, r->filename);
+#endif
+        }
+
         module = wsgi_load_source(name, r->filename);
 
         if (module) {
@@ -2039,7 +2072,7 @@ static PyObject *wsgi_import_script(request_rec *r, int reloading)
 #else
             object = PyLong_FromLongLong(r->finfo.mtime);
 #endif
-            PyDict_SetItemString(dict, "__mod_wsgi_mtime__", object);
+            PyDict_SetItemString(dict, "__mtime__", object);
             Py_DECREF(object);
         }
     }
@@ -2989,7 +3022,7 @@ static int wsgi_hook_handler(request_rec *r)
 
     /* Import module containing target wsgi application. */
 
-    module = wsgi_import_script(r, reloading);
+    module = wsgi_import_script(r, reloading, interpreter);
 
     if (module) {
         PyObject *module_dict = NULL;
