@@ -35,6 +35,10 @@
 #endif
 #endif
 
+#if !defined(AP_SERVER_BASEVERSION)
+#define AP_SERVER_BASEVERSION SERVER_BASEVERSION
+#endif
+
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
 typedef int apr_status_t;
 #define APR_SUCCESS 0
@@ -1654,6 +1658,34 @@ static PyMethodDef wsgi_signal_method[] = {
     { NULL, NULL }
 };
 
+static void wsgi_python_version(server_rec *s)
+{
+    const char *compile = PY_VERSION;
+    const char *dynamic = 0;
+
+    dynamic = strtok((char *)Py_GetVersion(), " ");
+
+    if (strcmp(compile, dynamic) != 0) {
+#if AP_SERVER_MAJORVERSION_NUMBER < 2
+        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, s,
+                     "mod_wsgi: Compiled for Python/%s.", compile);
+        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, s,
+                     "mod_wsgi: Runtime using Python/%s.", dynamic);
+        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, s,
+                     "mod_wsgi: Python module path '%s'.",
+                     Py_GetPath());
+#else
+        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, s,
+                     "mod_wsgi: Compiled for Python/%s.", compile);
+        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, s,
+                     "mod_wsgi: Runtime using Python/%s.", dynamic);
+        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, s,
+                     "mod_wsgi: Python module path '%s'.",
+                     Py_GetPath());
+#endif
+    }
+}
+
 #if AP_SERVER_MAJORVERSION_NUMBER >= 2
 static apr_status_t wsgi_python_term(void *data)
 {
@@ -1694,6 +1726,15 @@ static void wsgi_python_init(apr_pool_t *pconf, server_rec *s)
 #else
     static int initialised = 1;
 #endif
+
+    /*
+     * Check that the version of Python found at
+     * runtime is what was used at compilation.
+     */
+
+    wsgi_python_version(s);
+
+    /* Perform initialisation if required. */
 
     if (!Py_IsInitialized() || !initialised) {
         char buffer[256];
