@@ -1642,10 +1642,10 @@ static PyObject *wsgi_signal_intercept(PyObject *self, PyObject *args)
 
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
     ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR, 0,
-                 "mod_wsgi: signal handler registration ignored: %d", n);
+                 "mod_wsgi: Callback registration for signal %d ignored.", n);
 #else
     ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR, 0, 0,
-                 "mod_wsgi: signal handler registration ignored: %d", n);
+                 "mod_wsgi: Callback registration for signal %d ignored.", n);
 #endif
 
     Py_INCREF(o);
