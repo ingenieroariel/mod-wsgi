@@ -241,7 +241,7 @@ static void Log_output(LogObject *self, const char *msg)
             s = (char *)malloc(n);
             strncpy(s, self->s, m);
             strncpy(s+m, p, q-p);
-            s[n] = '\0';
+            s[n-1] = '\0';
 
             if (self->r) {
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
@@ -275,7 +275,7 @@ static void Log_output(LogObject *self, const char *msg)
 
             s = (char *)malloc(n);
             strncpy(s, p, q-p);
-            s[n] = '\0';
+            s[n-1] = '\0';
 
             if (self->r) {
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
@@ -1822,6 +1822,7 @@ static PyThreadState *wsgi_acquire_interpreter(const char *name)
     PyThreadState *tstate = NULL;
     PyInterpreterState *interp = NULL;
     PyObject *handle = NULL;
+    PyObject *object = NULL;
     PyObject *module = NULL;
 
     /* In a multithreaded MPM must protect table. */
@@ -1864,6 +1865,10 @@ static PyThreadState *wsgi_acquire_interpreter(const char *name)
         PyModule_AddObject(module, "version", Py_BuildValue("(ii)",
                            MOD_WSGI_MAJORVERSION_NUMBER,
                            MOD_WSGI_MINORVERSION_NUMBER));
+
+        object = (PyObject *)newLogObject(NULL);
+        PyModule_AddObject(module, "stderr", object);
+        PySys_SetObject("stderr", object);
 
         /* Install intercept for signal handler registration. */
 
@@ -2218,7 +2223,7 @@ static void wsgi_python_child_init(apr_pool_t *p)
     PyThreadState *tstate_active = NULL;
     PyThreadState *tstate_inactive = NULL;
 
-    PyObject *handle = NULL;
+    PyObject *object = NULL;
     PyObject *module = NULL;
 
     /* Working with Python, so must acquire GIL. */
@@ -2273,9 +2278,9 @@ static void wsgi_python_child_init(apr_pool_t *p)
      * properly.
      */
 
-    handle = PyCObject_FromVoidPtr((void *)interp, NULL);
-    PyDict_SetItemString(wsgi_interpreters, "", handle);
-    Py_DECREF(handle);
+    object = PyCObject_FromVoidPtr((void *)interp, NULL);
+    PyDict_SetItemString(wsgi_interpreters, "", object);
+    Py_DECREF(object);
 
     /* Create mod_wsgi Python module within main interpreter. */
 
@@ -2284,6 +2289,10 @@ static void wsgi_python_child_init(apr_pool_t *p)
     PyModule_AddObject(module, "version", Py_BuildValue("(ii)",
                        MOD_WSGI_MAJORVERSION_NUMBER,
                        MOD_WSGI_MINORVERSION_NUMBER));
+
+    object = (PyObject *)newLogObject(NULL);
+    PyModule_AddObject(module, "stderr", object);
+    PySys_SetObject("stderr", object);
 
     /* Install intercept for signal handler registration. */
 
