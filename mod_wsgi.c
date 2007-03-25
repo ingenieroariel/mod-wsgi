@@ -107,9 +107,11 @@ typedef struct {
     apr_array_header_t *aliases;
     const char *interpreter;
     const char *callable;
-    int optimise;
+    int optimize;
     int reloading;
     int buffering;
+    int xstdin;
+    int xstdout;
 } WSGIServerConfig;
 
 static WSGIServerConfig *newWSGIServerConfig(apr_pool_t *p)
@@ -122,12 +124,16 @@ static WSGIServerConfig *newWSGIServerConfig(apr_pool_t *p)
     object->aliases = NULL;
     object->interpreter = NULL;
     object->callable = NULL;
-    object->optimise = -1;
+    object->optimize = -1;
     object->reloading = -1;
     object->buffering = -1;
+    object->xstdin = -1;
+    object->xstdout = -1;
 
     return object;
 }
+
+static WSGIServerConfig *wsgi_server_config = NULL;
 
 /*
  * Class objects used by response handler.
@@ -419,6 +425,85 @@ static PyTypeObject Log_Type = {
     0,                      /*tp_iter*/
     0,                      /*tp_iternext*/
     Log_methods,            /*tp_methods*/
+    0,                      /*tp_members*/
+    0,                      /*tp_getset*/
+    0,                      /*tp_base*/
+    0,                      /*tp_dict*/
+    0,                      /*tp_descr_get*/
+    0,                      /*tp_descr_set*/
+    0,                      /*tp_dictoffset*/
+    0,                      /*tp_init*/
+    0,                      /*tp_alloc*/
+    0,                      /*tp_new*/
+    0,                      /*tp_free*/
+    0,                      /*tp_is_gc*/
+};
+
+typedef struct {
+    PyObject_HEAD
+    const char *s;
+} NullIOObject;
+
+static PyTypeObject NullIO_Type;
+
+static NullIOObject *newNullIOObject(const char *s)
+{
+    NullIOObject *self;
+
+    self = PyObject_New(NullIOObject, &NullIO_Type);
+    if (self == NULL)
+        return NULL;
+
+    self->s = s;
+
+    return self;
+}
+
+static void NullIO_dealloc(NullIOObject *self)
+{
+    PyObject_Del(self);
+}
+
+static PyObject *NullIO_getattr(NullIOObject *self, char *name)
+{
+    PyErr_Format(PyExc_IOError, "%s access restricted by mod_wsgi", self->s);
+
+    return NULL;
+}
+
+static PyTypeObject NullIO_Type = {
+    /* The ob_type field must be initialized in the module init function
+     * to be portable to Windows without using C++. */
+    PyObject_HEAD_INIT(NULL)
+    0,                      /*ob_size*/
+    "mod_wsgi.NullIO",      /*tp_name*/
+    sizeof(NullIOObject),   /*tp_basicsize*/
+    0,                      /*tp_itemsize*/
+    /* methods */
+    (destructor)NullIO_dealloc, /*tp_dealloc*/
+    0,                      /*tp_print*/
+    (getattrfunc)NullIO_getattr, /*tp_getattr*/
+    0,                      /*tp_setattr*/
+    0,                      /*tp_compare*/
+    0,                      /*tp_repr*/
+    0,                      /*tp_as_number*/
+    0,                      /*tp_as_sequence*/
+    0,                      /*tp_as_mapping*/
+    0,                      /*tp_hash*/
+    0,                      /*tp_call*/
+    0,                      /*tp_str*/
+    0,                      /*tp_getattro*/
+    0,                      /*tp_setattro*/
+    0,                      /*tp_as_buffer*/
+    Py_TPFLAGS_DEFAULT,     /*tp_flags*/
+    0,                      /*tp_doc*/
+    0,                      /*tp_traverse*/
+    0,                      /*tp_clear*/
+    0,                      /*tp_richcompare*/
+    0,                      /*tp_weaklistoffset*/
+    0,                      /*tp_iter*/
+    0,                      /*tp_iternext*/
+    0,                      /*tp_methods*/
     0,                      /*tp_members*/
     0,                      /*tp_getset*/
     0,                      /*tp_base*/
@@ -1658,7 +1743,7 @@ static PyMethodDef wsgi_signal_method[] = {
     { NULL, NULL }
 };
 
-static void wsgi_python_version(server_rec *s)
+static void wsgi_python_version()
 {
     const char *compile = PY_VERSION;
     const char *dynamic = 0;
@@ -1667,19 +1752,19 @@ static void wsgi_python_version(server_rec *s)
 
     if (strcmp(compile, dynamic) != 0) {
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
-        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, s,
+        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0,
                      "mod_wsgi: Compiled for Python/%s.", compile);
-        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, s,
+        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0,
                      "mod_wsgi: Runtime using Python/%s.", dynamic);
-        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, s,
+        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0,
                      "mod_wsgi: Python module path '%s'.",
                      Py_GetPath());
 #else
-        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, s,
+        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, 0,
                      "mod_wsgi: Compiled for Python/%s.", compile);
-        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, s,
+        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, 0,
                      "mod_wsgi: Runtime using Python/%s.", dynamic);
-        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, s,
+        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, 0,
                      "mod_wsgi: Python module path '%s'.",
                      Py_GetPath());
 #endif
@@ -1717,7 +1802,7 @@ static apr_status_t wsgi_python_term(void *data)
 }
 #endif
 
-static void wsgi_python_init(apr_pool_t *pconf, server_rec *s)
+static void wsgi_python_init(apr_pool_t *pconf)
 {
     WSGIServerConfig *config = NULL;
 
@@ -1732,7 +1817,7 @@ static void wsgi_python_init(apr_pool_t *pconf, server_rec *s)
      * runtime is what was used at compilation.
      */
 
-    wsgi_python_version(s);
+    wsgi_python_version();
 
     /* Perform initialisation if required. */
 
@@ -1743,9 +1828,7 @@ static void wsgi_python_init(apr_pool_t *pconf, server_rec *s)
  
         /* Check for optimisation flag. */
 
-        config = ap_get_module_config(s->module_config, &wsgi_module);
-
-        if (config->optimise > 0)
+        if (wsgi_server_config->optimize > 0)
             Py_OptimizeFlag = 2;
         else
             Py_OptimizeFlag = 0;
@@ -1869,6 +1952,23 @@ static PyThreadState *wsgi_acquire_interpreter(const char *name)
         object = (PyObject *)newLogObject(NULL);
         PyModule_AddObject(module, "stderr", object);
         PySys_SetObject("stderr", object);
+
+        if (wsgi_server_config->xstdout != 0) {
+            object = (PyObject *)newNullIOObject("sys.stdout");
+            PyModule_AddObject(module, "stdout", object);
+            PySys_SetObject("stdout", object);
+        }
+        else {
+            object = (PyObject *)newLogObject(NULL);
+            PyModule_AddObject(module, "stdout", object);
+            PySys_SetObject("stdout", object);
+        }
+
+        if (wsgi_server_config->xstdin != 0) {
+            object = (PyObject *)newNullIOObject("sys.stdin");
+            PyModule_AddObject(module, "stdin", object);
+            PySys_SetObject("stdin", object);
+        }
 
         /* Install intercept for signal handler registration. */
 
@@ -2257,6 +2357,7 @@ static void wsgi_python_child_init(apr_pool_t *p)
     /* Finalise any Python objects required by child process. */
 
     PyType_Ready(&Log_Type);
+    PyType_Ready(&NullIO_Type);
     PyType_Ready(&Input_Type);
     PyType_Ready(&Adapter_Type);
 
@@ -2293,6 +2394,23 @@ static void wsgi_python_child_init(apr_pool_t *p)
     object = (PyObject *)newLogObject(NULL);
     PyModule_AddObject(module, "stderr", object);
     PySys_SetObject("stderr", object);
+
+    if (wsgi_server_config->xstdout != 0) {
+        object = (PyObject *)newNullIOObject("sys.stdout");
+        PyModule_AddObject(module, "stdout", object);
+        PySys_SetObject("stdout", object);
+    }
+    else {
+        object = (PyObject *)newLogObject(NULL);
+        PyModule_AddObject(module, "stdout", object);
+        PySys_SetObject("stdout", object);
+    }
+
+    if (wsgi_server_config->xstdin != 0) {
+        object = (PyObject *)newNullIOObject("sys.stdin");
+        PyModule_AddObject(module, "stdin", object);
+        PySys_SetObject("stdin", object);
+    }
 
     /* Install intercept for signal handler registration. */
 
@@ -2379,10 +2497,10 @@ static void *wsgi_merge_server_config(apr_pool_t *p, void *base_conf,
     else
         config->callable = parent->callable;
 
-    if (child->optimise != -1)
-        config->optimise = child->optimise;
+    if (child->optimize != -1)
+        config->optimize = child->optimize;
     else
-        config->optimise = parent->optimise;
+        config->optimize = parent->optimize;
 
     if (child->reloading != -1)
         config->reloading = child->reloading;
@@ -2393,6 +2511,16 @@ static void *wsgi_merge_server_config(apr_pool_t *p, void *base_conf,
         config->buffering = child->buffering;
     else
         config->buffering = parent->buffering;
+
+    if (child->xstdin != -1)
+        config->xstdin = child->xstdin;
+    else
+        config->xstdin = parent->xstdin;
+
+    if (child->xstdout != -1)
+        config->xstdout = child->xstdout;
+    else
+        config->xstdout = parent->xstdout;
 
     return config;
 }
@@ -2428,10 +2556,10 @@ static void *wsgi_merge_dir_config(apr_pool_t *p, void *base_conf,
     else
         config->callable = parent->callable;
 
-    if (child->optimise != -1)
-        config->optimise = child->optimise;
+    if (child->optimize != -1)
+        config->optimize = child->optimize;
     else
-        config->optimise = parent->optimise;
+        config->optimize = parent->optimize;
 
     if (child->reloading != -1)
         config->reloading = child->reloading;
@@ -2442,6 +2570,16 @@ static void *wsgi_merge_dir_config(apr_pool_t *p, void *base_conf,
         config->buffering = child->buffering;
     else
         config->buffering = parent->buffering;
+
+    if (child->xstdin != -1)
+        config->xstdin = child->xstdin;
+    else
+        config->xstdin = parent->xstdin;
+
+    if (child->xstdout != -1)
+        config->xstdout = child->xstdout;
+    else
+        config->xstdout = parent->xstdout;
 
     return config;
 }
@@ -2481,7 +2619,7 @@ static const char *wsgi_optimize_directive(cmd_parms *cmd, void *mconfig,
     WSGIServerConfig *config = NULL;
 
     config = ap_get_module_config(cmd->server->module_config, &wsgi_module);
-    config->optimise = !strcasecmp(f, "On");
+    config->optimize = !strcasecmp(f, "On");
 
     return NULL;
 }
@@ -2554,6 +2692,28 @@ static const char *wsgi_buffering_directive(cmd_parms *cmd, void *mconfig,
                                        &wsgi_module);
         sconfig->buffering = !strcasecmp(f, "On");
     }
+
+    return NULL;
+}
+
+static const char *wsgi_restrict_stdin(cmd_parms *cmd, void *mconfig,
+                                       const char *f)
+{
+    WSGIServerConfig *config = NULL;
+
+    config = ap_get_module_config(cmd->server->module_config, &wsgi_module);
+    config->xstdin = !!strcasecmp(f, "Off");
+
+    return NULL;
+}
+
+static const char *wsgi_restrict_stdout(cmd_parms *cmd, void *mconfig,
+                                        const char *f)
+{
+    WSGIServerConfig *config = NULL;
+
+    config = ap_get_module_config(cmd->server->module_config, &wsgi_module);
+    config->xstdout = !!strcasecmp(f, "Off");
 
     return NULL;
 }
@@ -3102,7 +3262,9 @@ void wsgi_hook_init(server_rec *s, apr_pool_t *p)
 
     ap_add_version_component(package);
 
-    wsgi_python_init(NULL, s);
+    wsgi_server_config = ap_get_module_config(s->module_config, &wsgi_module);
+
+    wsgi_python_init(NULL);
 }
 
 static void wsgi_hook_child_init(server_rec *s, apr_pool_t *p)
@@ -3133,6 +3295,10 @@ static const command_rec wsgi_commands[] =
         OR_FILEINFO, TAKE1, "Enable/Disable reloading of WSGI script file." },
     { "WSGIOutputBuffering", wsgi_buffering_directive, NULL,
         OR_FILEINFO, TAKE1, "Enable/Disable buffering of response." },
+    { "WSGIRestrictStdin", wsgi_restrict_stdin, NULL,
+        RSRC_CONF, TAKE1, "Enable/Disable restrictions on use of STDIN." },
+    { "WSGIRestrictStdout", wsgi_restrict_stdout, NULL,
+        RSRC_CONF, TAKE1, "Enable/Disable restrictions on use of STDOUT." },
     { NULL }
 };
 
@@ -3182,7 +3348,9 @@ static int wsgi_hook_init(apr_pool_t *pconf, apr_pool_t *ptemp,
 
     ap_add_version_component(pconf, package);
 
-    wsgi_python_init(pconf, s);
+    wsgi_server_config = ap_get_module_config(s->module_config, &wsgi_module);
+
+    wsgi_python_init(pconf);
 
     return OK;
 }
@@ -3228,6 +3396,10 @@ static const command_rec wsgi_commands[] =
         OR_FILEINFO, "Enable/Disable reloading of WSGI script file."),
     AP_INIT_TAKE1("WSGIOutputBuffering", wsgi_buffering_directive, NULL,
         OR_FILEINFO, "Enable/Disable buffering of response."),
+    AP_INIT_TAKE1("WSGIRestrictStdin", wsgi_restrict_stdin, NULL,
+        RSRC_CONF, "Enable/Disable restrictions on use of STDIN."),
+    AP_INIT_TAKE1("WSGIRestrictStdout", wsgi_restrict_stdout, NULL,
+        RSRC_CONF, "Enable/Disable restrictions on use of STDOUT."),
     { NULL }
 };
 
