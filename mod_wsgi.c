@@ -133,8 +133,6 @@ static WSGIServerConfig *newWSGIServerConfig(apr_pool_t *p)
     return object;
 }
 
-static WSGIServerConfig *wsgi_server_config = NULL;
-
 /*
  * Class objects used by response handler.
  */
@@ -1717,6 +1715,8 @@ static int wsgi_python_initialised = 0;
 static apr_pool_t *wsgi_server_pool = NULL;
 #endif
 
+static WSGIServerConfig *wsgi_server_config = NULL;
+
 static PyObject *wsgi_signal_intercept(PyObject *self, PyObject *args)
 {
     PyObject *o = NULL;
@@ -1726,11 +1726,13 @@ static PyObject *wsgi_signal_intercept(PyObject *self, PyObject *args)
         return NULL;
 
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
-    ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR, 0,
-                 "mod_wsgi: Callback registration for signal %d ignored.", n);
+    ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0,
+                 "mod_wsgi (pid=%d): Callback registration for "
+                 "signal %d ignored.", getpid(), n);
 #else
-    ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR, 0, 0,
-                 "mod_wsgi: Callback registration for signal %d ignored.", n);
+    ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, 0,
+                 "mod_wsgi (pid=%d): Callback registration for "
+                 "signal %d ignored.", getpid(), n);
 #endif
 
     Py_INCREF(o);
@@ -2263,21 +2265,81 @@ static apr_status_t wsgi_python_child_cleanup(void *data)
                 res = PyEval_CallObject(exitfunc, (PyObject *)NULL);
                 if (res == NULL) {
                     if (PyErr_ExceptionMatches(PyExc_SystemExit)) {
-                        PySys_WriteStderr("Function sys.exitfunc() raised "
-                                          "SystemExit exception");
+#if AP_SERVER_MAJORVERSION_NUMBER < 2
+                        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE,
+                                     0, "mod_wsgi (pid=%d): SystemExit "
+                                     "exception raised by sys.exitfunc() "
+                                     "ignored.", getpid());
+#else
+                        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE,
+                                     0, 0, "mod_wsgi (pid=%d): SystemExit "
+                                     "exception raised by sys.exitfunc() "
+                                     "ignored.", getpid());
+#endif
                         PyErr_Clear();
-                        fflush(stderr);
                     }
                     else {
-                        PyErr_Print();
-                        fflush(stderr);
+                        PyObject *module = NULL;
+                        PyObject *result = NULL;
+
+                        PyObject *type = NULL;
+                        PyObject *value = NULL;
+                        PyObject *traceback = NULL;
+
+#if AP_SERVER_MAJORVERSION_NUMBER < 2
+                        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE,
+                                     0, "mod_wsgi (pid=%d): Exception "
+                                     "occurred within sys.exitfunc().",
+                                     getpid());
+#else
+                        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE,
+                                     0, 0, "mod_wsgi (pid=%d): Exception "
+                                     "occurred within sys.exitfunc().",
+                                     getpid());
+#endif
+
+                        PyErr_Fetch(&type, &value, &traceback);
+
+                        module = PyImport_ImportModule("traceback");
+
+                        if (module) {
+                            PyObject *d = NULL;
+                            PyObject *o = NULL;
+                            d = PyModule_GetDict(module);
+                            o = PyDict_GetItemString(d, "print_exception");
+                            if (o) {
+                                PyObject *log = NULL;
+                                PyObject *args = NULL;
+                                log = (PyObject *)newLogObject(NULL);
+                                args = Py_BuildValue("(OOOOO)", type, value,
+                                                     traceback, Py_None, log);
+                                result = PyEval_CallObject(o, args);
+                                Py_DECREF(args);
+                                Py_DECREF(log);
+                            }
+                            Py_DECREF(o);
+                        }
+
+                        if (!result) {
+                            PyErr_Restore(type, value, traceback);
+
+                            PyErr_Print();
+                            if (Py_FlushLine())
+                                PyErr_Clear();
+                        }
+                        else {
+                            Py_XDECREF(type);
+                            Py_XDECREF(value);
+                            Py_XDECREF(traceback);
+                        }
+
+                        Py_XDECREF(result);
+
+                        Py_DECREF(module);
                     }
                 }
                 Py_DECREF(exitfunc);
             }
-
-            if (Py_FlushLine())
-                PyErr_Clear();
 
             /* Destroy the interpreter. */
 
@@ -3232,7 +3294,6 @@ static int wsgi_hook_handler(request_rec *r)
             wsgi_log_script_error(r, "Target wsgi script raised SystemExit "
                                   "exception", r->filename);
             PyErr_Clear();
-            fflush(stderr);
         }
         else {
             PyErr_Print();
