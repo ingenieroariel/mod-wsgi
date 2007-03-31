@@ -2157,26 +2157,26 @@ static PyObject *wsgi_import_script(request_rec *r, int reloading,
         if (found) {
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
             ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0,
-                         "mod_wsgi (pid=%d, group='%s'): "
-                         "Reloading script '%s'.", getpid(),
+                         "mod_wsgi (pid=%d, interpreter='%s'): "
+                         "Reloading WSGI script '%s'.", getpid(),
                          interpreter, r->filename);
 #else
             ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, 0,
-                         "mod_wsgi (pid=%d, group='%s'): "
-                         "Reloading script '%s'.", getpid(),
+                         "mod_wsgi (pid=%d, interpreter='%s'): "
+                         "Reloading WSGI script '%s'.", getpid(),
                          interpreter, r->filename);
 #endif
         }
         else {
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
             ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0,
-                         "mod_wsgi (pid=%d, group='%s'): "
-                         "Loading script '%s'.", getpid(),
+                         "mod_wsgi (pid=%d, interpreter='%s'): "
+                         "Loading WSGI script '%s'.", getpid(),
                          interpreter, r->filename);
 #else
             ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, 0,
-                         "mod_wsgi (pid=%d, group='%s'): "
-                         "Loading script '%s'.", getpid(),
+                         "mod_wsgi (pid=%d, interpreter='%s'): "
+                         "Loading WSGI script '%s'.", getpid(),
                          interpreter, r->filename);
 #endif
         }
@@ -3136,7 +3136,7 @@ static int wsgi_is_script_aliased(request_rec *r)
 
 static int wsgi_hook_handler(request_rec *r)
 {
-    int result;
+    int status;
 
     WSGIServerConfig *sconfig = NULL;
     WSGIServerConfig *dconfig = NULL;
@@ -3181,13 +3181,13 @@ static int wsgi_hook_handler(request_rec *r)
 
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
     if (r->finfo.st_mode == 0) {
-        wsgi_log_script_error(r, "Target wsgi script not found or unable "
+        wsgi_log_script_error(r, "Target WSGI script not found or unable "
                               "to stat", r->filename);
         return HTTP_NOT_FOUND;
     }
 #else
     if (r->finfo.filetype == 0) {
-        wsgi_log_script_error(r, "Target wsgi script not found or unable "
+        wsgi_log_script_error(r, "Target WSGI script not found or unable "
                               "to stat", r->filename);
         return HTTP_NOT_FOUND;
     }
@@ -3195,13 +3195,13 @@ static int wsgi_hook_handler(request_rec *r)
 
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
     if (S_ISDIR(r->finfo.st_mode)) {
-        wsgi_log_script_error(r, "Attempt to invoke directory as wsgi "
+        wsgi_log_script_error(r, "Attempt to invoke directory as WSGI "
                               "application", r->filename);
         return HTTP_FORBIDDEN;
     }
 #else
     if (r->finfo.filetype == APR_DIR) {
-        wsgi_log_script_error(r, "Attempt to invoke directory as wsgi "
+        wsgi_log_script_error(r, "Attempt to invoke directory as WSGI "
                               "application", r->filename);
         return HTTP_FORBIDDEN;
     }
@@ -3224,14 +3224,14 @@ static int wsgi_hook_handler(request_rec *r)
 
     /* Setup policy to apply if request contains a body. */
 
-    result = ap_setup_client_block(r, REQUEST_CHUNKED_ERROR);
+    status = ap_setup_client_block(r, REQUEST_CHUNKED_ERROR);
 
-    if (result != OK)
-        return result;
+    if (status != OK)
+        return status;
 
     /* Assume an internal server error unless everything okay. */
 
-    result = HTTP_INTERNAL_SERVER_ERROR;
+    status = HTTP_INTERNAL_SERVER_ERROR;
 
     /* Get config relevant to this request. */
 
@@ -3304,35 +3304,112 @@ static int wsgi_hook_handler(request_rec *r)
                                        reloading, buffering);
 
             if (adapter)
-                result = Adapter_run(adapter, object);
+                status = Adapter_run(adapter, object);
 
             Py_XDECREF((PyObject *)adapter);
 
             Py_DECREF(object);
         }
         else {
-            wsgi_log_script_error(r, "Target wsgi script does not contain "
-                                  "wsgi application", apr_pstrcat(r->pool,
+            wsgi_log_script_error(r, "Target WSGI script does not contain "
+                                  "WSGI application", apr_pstrcat(r->pool,
                                   r->filename, "::", callable, NULL));
 
-            result = HTTP_NOT_FOUND;
+            status = HTTP_NOT_FOUND;
         }
     }
     else {
-        wsgi_log_script_error(r, "Target wsgi script cannot be loaded "
+        wsgi_log_script_error(r, "Target WSGI script cannot be loaded "
                               "as Python module", r->filename);
     }
 
     if (PyErr_Occurred()) {
+        PyObject *m = NULL;
+        PyObject *result = NULL;
+
+        PyObject *type = NULL;
+        PyObject *value = NULL;
+        PyObject *traceback = NULL;
+
         if (PyErr_ExceptionMatches(PyExc_SystemExit)) {
-            wsgi_log_script_error(r, "Target wsgi script raised SystemExit "
-                                  "exception", r->filename);
-            PyErr_Clear();
+#if AP_SERVER_MAJORVERSION_NUMBER < 2
+            ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE,
+                         0, "mod_wsgi (pid=%d): SystemExit "
+                         "exception raised by WSGI script "
+                         "'%s' ignored.", getpid(), r->filename);
+#else
+            ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE,
+                         0, 0, "mod_wsgi (pid=%d): SystemExit "
+                         "exception raised by WSGI script "
+                         "'%s' ignored.", getpid(), r->filename);
+#endif
         }
         else {
-            PyErr_Print();
-            fflush(stderr);
+#if AP_SERVER_MAJORVERSION_NUMBER < 2
+            ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE,
+                         0, "mod_wsgi (pid=%d): Exception "
+                         "occurred within WSGI script '%s'.",
+                         getpid(), r->filename);
+#else
+            ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE,
+                         0, 0, "mod_wsgi (pid=%d): Exception "
+                         "occurred within WSGI script '%s'.",
+                         getpid(), r->filename);
+#endif
         }
+
+        PyErr_Fetch(&type, &value, &traceback);
+
+        m = PyImport_ImportModule("traceback");
+
+        if (m) {
+            PyObject *d = NULL;
+            PyObject *o = NULL;
+            d = PyModule_GetDict(m);
+            o = PyDict_GetItemString(d, "print_exception");
+            if (o) {
+                PyObject *log = NULL;
+                PyObject *args = NULL;
+                log = (PyObject *)newLogObject(NULL);
+                args = Py_BuildValue("(OOOOO)", type, value,
+                                     traceback, Py_None, log);
+                result = PyEval_CallObject(o, args);
+                Py_DECREF(args);
+                Py_DECREF(log);
+            }
+            Py_DECREF(o);
+        }
+
+        if (!result) {
+            /*
+             * If can't output exception and traceback then
+             * use PyErr_Print to dump out details of the
+             * exception. For SystemExit though if we do
+             * that the process will actually be terminated
+             * so can only clear the exception information
+             * and keep going.
+             */
+
+            PyErr_Restore(type, value, traceback);
+
+            if (!PyErr_ExceptionMatches(PyExc_SystemExit)) {
+                PyErr_Print();
+                if (Py_FlushLine())
+                    PyErr_Clear();
+            }
+            else {
+                PyErr_Clear();
+            }
+        }
+        else {
+            Py_XDECREF(type);
+            Py_XDECREF(value);
+            Py_XDECREF(traceback);
+        }
+
+        Py_XDECREF(result);
+
+        Py_DECREF(m);
     }
 
     Py_XDECREF(module);
@@ -3341,7 +3418,7 @@ static int wsgi_hook_handler(request_rec *r)
 
     wsgi_release_interpreter(tstate);
 
-    return result;
+    return status;
 }
 
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
