@@ -3333,26 +3333,26 @@ static int wsgi_hook_handler(request_rec *r)
 
         if (PyErr_ExceptionMatches(PyExc_SystemExit)) {
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
-            ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE,
-                         0, "mod_wsgi (pid=%d): SystemExit "
+            ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE,
+                         r, "mod_wsgi (pid=%d): SystemExit "
                          "exception raised by WSGI script "
                          "'%s' ignored.", getpid(), r->filename);
 #else
-            ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE,
-                         0, 0, "mod_wsgi (pid=%d): SystemExit "
+            ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE,
+                         0, r, "mod_wsgi (pid=%d): SystemExit "
                          "exception raised by WSGI script "
                          "'%s' ignored.", getpid(), r->filename);
 #endif
         }
         else {
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
-            ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE,
-                         0, "mod_wsgi (pid=%d): Exception "
+            ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE,
+                         r, "mod_wsgi (pid=%d): Exception "
                          "occurred within WSGI script '%s'.",
                          getpid(), r->filename);
 #else
-            ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE,
-                         0, 0, "mod_wsgi (pid=%d): Exception "
+            ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE,
+                         0, r, "mod_wsgi (pid=%d): Exception "
                          "occurred within WSGI script '%s'.",
                          getpid(), r->filename);
 #endif
@@ -3368,14 +3368,11 @@ static int wsgi_hook_handler(request_rec *r)
             d = PyModule_GetDict(m);
             o = PyDict_GetItemString(d, "print_exception");
             if (o) {
-                PyObject *log = NULL;
                 PyObject *args = NULL;
-                log = (PyObject *)newLogObject(NULL);
                 args = Py_BuildValue("(OOOOO)", type, value,
                                      traceback, Py_None, log);
                 result = PyEval_CallObject(o, args);
                 Py_DECREF(args);
-                Py_DECREF(log);
             }
             Py_DECREF(o);
         }
