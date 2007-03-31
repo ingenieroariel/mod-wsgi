@@ -1737,7 +1737,7 @@ static PyObject *wsgi_signal_intercept(PyObject *self, PyObject *args)
             PyObject *args = NULL;
             PyObject *result = NULL;
             log = (PyObject *)newLogObject(NULL);
-            args = Py_BuildValue("(OO)", Py_None, log);
+            args = Py_BuildValue("(OOO)", Py_None, Py_None, log);
             result = PyEval_CallObject(o, args);
             Py_XDECREF(result);
             Py_DECREF(args);
@@ -2278,6 +2278,13 @@ static apr_status_t wsgi_python_child_cleanup(void *data)
                 PySys_SetObject("exitfunc", (PyObject *)NULL);
                 res = PyEval_CallObject(exitfunc, (PyObject *)NULL);
                 if (res == NULL) {
+                    PyObject *m = NULL;
+                    PyObject *result = NULL;
+
+                    PyObject *type = NULL;
+                    PyObject *value = NULL;
+                    PyObject *traceback = NULL;
+
                     if (PyErr_ExceptionMatches(PyExc_SystemExit)) {
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
                         ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE,
@@ -2290,16 +2297,8 @@ static apr_status_t wsgi_python_child_cleanup(void *data)
                                      "exception raised by sys.exitfunc() "
                                      "ignored.", getpid());
 #endif
-                        PyErr_Clear();
                     }
                     else {
-                        PyObject *m = NULL;
-                        PyObject *result = NULL;
-
-                        PyObject *type = NULL;
-                        PyObject *value = NULL;
-                        PyObject *traceback = NULL;
-
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
                         ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE,
                                      0, "mod_wsgi (pid=%d): Exception "
@@ -2311,48 +2310,60 @@ static apr_status_t wsgi_python_child_cleanup(void *data)
                                      "occurred within sys.exitfunc().",
                                      getpid());
 #endif
+                    }
 
-                        PyErr_Fetch(&type, &value, &traceback);
+                    PyErr_Fetch(&type, &value, &traceback);
 
-                        m = PyImport_ImportModule("traceback");
+                    m = PyImport_ImportModule("traceback");
 
-                        if (m) {
-                            PyObject *d = NULL;
-                            PyObject *o = NULL;
-                            d = PyModule_GetDict(m);
-                            o = PyDict_GetItemString(d, "print_exception");
-                            if (o) {
-                                PyObject *log = NULL;
-                                PyObject *args = NULL;
-                                log = (PyObject *)newLogObject(NULL);
-                                args = Py_BuildValue("(OOOOO)", type, value,
-                                                     traceback, Py_None, log);
-                                result = PyEval_CallObject(o, args);
-                                Py_DECREF(args);
-                                Py_DECREF(log);
-                            }
-                            Py_DECREF(o);
+                    if (m) {
+                        PyObject *d = NULL;
+                        PyObject *o = NULL;
+                        d = PyModule_GetDict(m);
+                        o = PyDict_GetItemString(d, "print_exception");
+                        if (o) {
+                            PyObject *log = NULL;
+                            PyObject *args = NULL;
+                            log = (PyObject *)newLogObject(NULL);
+                            args = Py_BuildValue("(OOOOO)", type, value,
+                                                 traceback, Py_None, log);
+                            result = PyEval_CallObject(o, args);
+                            Py_DECREF(args);
+                            Py_DECREF(log);
                         }
+                        Py_DECREF(o);
+                    }
 
-                        if (!result) {
-                            /* Must resort to using PyErr_Print(). */
+                    if (!result) {
+                        /*
+                         * If can't output exception and traceback then
+                         * use PyErr_Print to dump out details of the
+                         * exception. For SystemExit though if we do
+                         * that the process will actually be terminated
+                         * so can only clear the exception information
+                         * and keep going.
+                         */
 
-                            PyErr_Restore(type, value, traceback);
+                        PyErr_Restore(type, value, traceback);
 
+                        if (!PyErr_ExceptionMatches(PyExc_SystemExit)) {
                             PyErr_Print();
                             if (Py_FlushLine())
                                 PyErr_Clear();
                         }
                         else {
-                            Py_XDECREF(type);
-                            Py_XDECREF(value);
-                            Py_XDECREF(traceback);
+                            PyErr_Clear();
                         }
-
-                        Py_XDECREF(result);
-
-                        Py_DECREF(m);
                     }
+                    else {
+                        Py_XDECREF(type);
+                        Py_XDECREF(value);
+                        Py_XDECREF(traceback);
+                    }
+
+                    Py_XDECREF(result);
+
+                    Py_DECREF(m);
                 }
                 Py_DECREF(res);
                 Py_DECREF(exitfunc);
