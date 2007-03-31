@@ -112,6 +112,7 @@ typedef struct {
     int buffering;
     int xstdin;
     int xstdout;
+    int xsignal;
 } WSGIServerConfig;
 
 static WSGIServerConfig *newWSGIServerConfig(apr_pool_t *p)
@@ -129,6 +130,7 @@ static WSGIServerConfig *newWSGIServerConfig(apr_pool_t *p)
     object->buffering = -1;
     object->xstdin = -1;
     object->xstdout = -1;
+    object->xsignal = -1;
 
     return object;
 }
@@ -1992,12 +1994,12 @@ static PyThreadState *wsgi_acquire_interpreter(const char *name)
 
         /* Install intercept for signal handler registration. */
 
-        module = PyImport_ImportModule("signal");
-
-        PyModule_AddObject(module, "signal", PyCFunction_New(
-                           &wsgi_signal_method[0], NULL));
-
-        Py_DECREF(module);
+        if (wsgi_server_config->xsignal != 0) {
+            module = PyImport_ImportModule("signal");
+            PyModule_AddObject(module, "signal", PyCFunction_New(
+                               &wsgi_signal_method[0], NULL));
+            Py_DECREF(module);
+        }
 
         /*
          * Set sys.argv to empty array to fake out modules that
@@ -2508,12 +2510,12 @@ static void wsgi_python_child_init(apr_pool_t *p)
 
     /* Install intercept for signal handler registration. */
 
-    module = PyImport_ImportModule("signal");
-
-    PyModule_AddObject(module, "signal", PyCFunction_New(
-                       &wsgi_signal_method[0], NULL));
-
-    Py_DECREF(module);
+    if (wsgi_server_config->xsignal != 0) {
+        module = PyImport_ImportModule("signal");
+        PyModule_AddObject(module, "signal", PyCFunction_New(
+                           &wsgi_signal_method[0], NULL));
+        Py_DECREF(module);
+    }
 
     /*
      * Set sys.argv to empty array to fake out modules that
@@ -2616,6 +2618,11 @@ static void *wsgi_merge_server_config(apr_pool_t *p, void *base_conf,
     else
         config->xstdout = parent->xstdout;
 
+    if (child->xsignal != -1)
+        config->xsignal = child->xsignal;
+    else
+        config->xsignal = parent->xsignal;
+
     return config;
 }
 
@@ -2674,6 +2681,11 @@ static void *wsgi_merge_dir_config(apr_pool_t *p, void *base_conf,
         config->xstdout = child->xstdout;
     else
         config->xstdout = parent->xstdout;
+
+    if (child->xsignal != -1)
+        config->xsignal = child->xsignal;
+    else
+        config->xsignal = parent->xsignal;
 
     return config;
 }
@@ -2808,6 +2820,17 @@ static const char *wsgi_restrict_stdout(cmd_parms *cmd, void *mconfig,
 
     config = ap_get_module_config(cmd->server->module_config, &wsgi_module);
     config->xstdout = !!strcasecmp(f, "Off");
+
+    return NULL;
+}
+
+static const char *wsgi_restrict_signal(cmd_parms *cmd, void *mconfig,
+                                        const char *f)
+{
+    WSGIServerConfig *config = NULL;
+
+    config = ap_get_module_config(cmd->server->module_config, &wsgi_module);
+    config->xsignal = !!strcasecmp(f, "Off");
 
     return NULL;
 }
@@ -3474,6 +3497,8 @@ static const command_rec wsgi_commands[] =
         RSRC_CONF, TAKE1, "Enable/Disable restrictions on use of STDIN." },
     { "WSGIRestrictStdout", wsgi_restrict_stdout, NULL,
         RSRC_CONF, TAKE1, "Enable/Disable restrictions on use of STDOUT." },
+    { "WSGIRestrictSignal", wsgi_restrict_signal, NULL,
+        RSRC_CONF, TAKE1, "Enable/Disable restrictions on use of signal()." },
     { NULL }
 };
 
@@ -3575,6 +3600,8 @@ static const command_rec wsgi_commands[] =
         RSRC_CONF, "Enable/Disable restrictions on use of STDIN."),
     AP_INIT_TAKE1("WSGIRestrictStdout", wsgi_restrict_stdout, NULL,
         RSRC_CONF, "Enable/Disable restrictions on use of STDOUT."),
+    AP_INIT_TAKE1("WSGIRestrictSignal", wsgi_restrict_signal, NULL,
+        RSRC_CONF, "Enable/Disable restrictions on use of signal()."),
     { NULL }
 };
 
