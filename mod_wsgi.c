@@ -428,15 +428,15 @@ static PyTypeObject Log_Type = {
 typedef struct {
     PyObject_HEAD
     const char *s;
-} NullIOObject;
+} RestrictedObject;
 
-static PyTypeObject NullIO_Type;
+static PyTypeObject Restricted_Type;
 
-static NullIOObject *newNullIOObject(const char *s)
+static RestrictedObject *newRestrictedObject(const char *s)
 {
-    NullIOObject *self;
+    RestrictedObject *self;
 
-    self = PyObject_New(NullIOObject, &NullIO_Type);
+    self = PyObject_New(RestrictedObject, &Restricted_Type);
     if (self == NULL)
         return NULL;
 
@@ -445,30 +445,30 @@ static NullIOObject *newNullIOObject(const char *s)
     return self;
 }
 
-static void NullIO_dealloc(NullIOObject *self)
+static void Restricted_dealloc(RestrictedObject *self)
 {
     PyObject_Del(self);
 }
 
-static PyObject *NullIO_getattr(NullIOObject *self, char *name)
+static PyObject *Restricted_getattr(RestrictedObject *self, char *name)
 {
     PyErr_Format(PyExc_IOError, "%s access restricted by mod_wsgi", self->s);
 
     return NULL;
 }
 
-static PyTypeObject NullIO_Type = {
+static PyTypeObject Restricted_Type = {
     /* The ob_type field must be initialized in the module init function
      * to be portable to Windows without using C++. */
     PyObject_HEAD_INIT(NULL)
     0,                      /*ob_size*/
-    "mod_wsgi.NullIO",      /*tp_name*/
-    sizeof(NullIOObject),   /*tp_basicsize*/
+    "mod_wsgi.Restricted",  /*tp_name*/
+    sizeof(RestrictedObject), /*tp_basicsize*/
     0,                      /*tp_itemsize*/
     /* methods */
-    (destructor)NullIO_dealloc, /*tp_dealloc*/
+    (destructor)Restricted_dealloc, /*tp_dealloc*/
     0,                      /*tp_print*/
-    (getattrfunc)NullIO_getattr, /*tp_getattr*/
+    (getattrfunc)Restricted_getattr, /*tp_getattr*/
     0,                      /*tp_setattr*/
     0,                      /*tp_compare*/
     0,                      /*tp_repr*/
@@ -1928,6 +1928,7 @@ static PyThreadState *wsgi_acquire_interpreter(const char *name)
     PyObject *handle = NULL;
     PyObject *object = NULL;
     PyObject *module = NULL;
+    PyObject *item = NULL;
 
     /* In a multithreaded MPM must protect table. */
 
@@ -1971,28 +1972,49 @@ static PyThreadState *wsgi_acquire_interpreter(const char *name)
                            MOD_WSGI_MAJORVERSION_NUMBER,
                            MOD_WSGI_MINORVERSION_NUMBER));
 
+        /*
+         * Install restricted objects for STDIN and STDOUT,
+         * or log object for STDOUT as appropriate.
+         */
+
         object = (PyObject *)newLogObject(NULL);
-        PyModule_AddObject(module, "stderr", object);
         PySys_SetObject("stderr", object);
+        Py_DECREF(object);
 
         if (wsgi_server_config->xstdout != 0) {
-            object = (PyObject *)newNullIOObject("sys.stdout");
-            PyModule_AddObject(module, "stdout", object);
+            object = (PyObject *)newRestrictedObject("sys.stdout");
             PySys_SetObject("stdout", object);
+            Py_DECREF(object);
         }
         else {
             object = (PyObject *)newLogObject(NULL);
-            PyModule_AddObject(module, "stdout", object);
             PySys_SetObject("stdout", object);
+            Py_DECREF(object);
         }
 
         if (wsgi_server_config->xstdin != 0) {
-            object = (PyObject *)newNullIOObject("sys.stdin");
-            PyModule_AddObject(module, "stdin", object);
+            object = (PyObject *)newRestrictedObject("sys.stdin");
             PySys_SetObject("stdin", object);
+            Py_DECREF(object);
         }
 
-        /* Install intercept for signal handler registration. */
+        /*
+	 * Set sys.argv to one element list to fake out
+	 * modules that look there for Python command
+	 * line arguments as appropriate.
+         */
+
+        object = PyList_New(0);
+        item = PyString_FromString("mod_wsgi");
+        PyList_Append(object, item);
+        PySys_SetObject("argv", object);
+        Py_DECREF(item);
+        Py_DECREF(object);
+
+        /*
+	 * Install intercept for signal handler registration if
+	 * appropriate.
+         */
 
         if (wsgi_server_config->xsignal != 0) {
             module = PyImport_ImportModule("signal");
@@ -2000,17 +2022,6 @@ static PyThreadState *wsgi_acquire_interpreter(const char *name)
                                &wsgi_signal_method[0], NULL));
             Py_DECREF(module);
         }
-
-        /*
-         * Set sys.argv to empty array to fake out modules that
-         * look there for Python command line arguments.
-         */
-
-        module = PyImport_ImportModule("sys");
-
-        PyModule_AddObject(module, "argv", PyList_New(0));
-
-        Py_DECREF(module);
     }
 
     /* Create thread state object if needed. */
@@ -2421,6 +2432,7 @@ static void wsgi_python_child_init(apr_pool_t *p)
 
     PyObject *object = NULL;
     PyObject *module = NULL;
+    PyObject *item = NULL;
 
     /* Working with Python, so must acquire GIL. */
 
@@ -2453,7 +2465,7 @@ static void wsgi_python_child_init(apr_pool_t *p)
     /* Finalise any Python objects required by child process. */
 
     PyType_Ready(&Log_Type);
-    PyType_Ready(&NullIO_Type);
+    PyType_Ready(&Restricted_Type);
     PyType_Ready(&Input_Type);
     PyType_Ready(&Adapter_Type);
 
@@ -2487,28 +2499,49 @@ static void wsgi_python_child_init(apr_pool_t *p)
                        MOD_WSGI_MAJORVERSION_NUMBER,
                        MOD_WSGI_MINORVERSION_NUMBER));
 
+    /*
+     * Install restricted objects for STDIN and STDOUT,
+     * or log object for STDOUT as appropriate.
+     */
+
     object = (PyObject *)newLogObject(NULL);
-    PyModule_AddObject(module, "stderr", object);
     PySys_SetObject("stderr", object);
+    Py_DECREF(object);
 
     if (wsgi_server_config->xstdout != 0) {
-        object = (PyObject *)newNullIOObject("sys.stdout");
-        PyModule_AddObject(module, "stdout", object);
+        object = (PyObject *)newRestrictedObject("sys.stdout");
         PySys_SetObject("stdout", object);
+        Py_DECREF(object);
     }
     else {
         object = (PyObject *)newLogObject(NULL);
-        PyModule_AddObject(module, "stdout", object);
         PySys_SetObject("stdout", object);
+        Py_DECREF(object);
     }
 
     if (wsgi_server_config->xstdin != 0) {
-        object = (PyObject *)newNullIOObject("sys.stdin");
-        PyModule_AddObject(module, "stdin", object);
+        object = (PyObject *)newRestrictedObject("sys.stdin");
         PySys_SetObject("stdin", object);
+        Py_DECREF(object);
     }
 
-    /* Install intercept for signal handler registration. */
+    /*
+     * Set sys.argv to one element list to fake out
+     * modules that look there for Python command
+     * line arguments as appropriate.
+     */
+
+    object = PyList_New(0);
+    item = PyString_FromString("mod_wsgi");
+    PyList_Append(object, item);
+    PySys_SetObject("argv", object);
+    Py_DECREF(item);
+    Py_DECREF(object);
+
+    /*
+     * Install intercept for signal handler registration if
+     * appropriate.
+     */
 
     if (wsgi_server_config->xsignal != 0) {
         module = PyImport_ImportModule("signal");
@@ -2516,17 +2549,6 @@ static void wsgi_python_child_init(apr_pool_t *p)
                            &wsgi_signal_method[0], NULL));
         Py_DECREF(module);
     }
-
-    /*
-     * Set sys.argv to empty array to fake out modules that
-     * look there for Python command line arguments.
-     */
-
-    module = PyImport_ImportModule("sys");
-
-    PyModule_AddObject(module, "argv", PyList_New(0));
-
-    Py_DECREF(module);
 
     /* Restore the prior thread state and release the GIL. */
 
