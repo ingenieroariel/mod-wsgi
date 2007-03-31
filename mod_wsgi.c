@@ -140,6 +140,7 @@ static WSGIServerConfig *newWSGIServerConfig(apr_pool_t *p)
 typedef struct {
         PyObject_HEAD
         request_rec *r;
+        int level;
         char *s;
 } LogObject;
 
@@ -154,6 +155,7 @@ static LogObject *newLogObject(request_rec *r)
         return NULL;
 
     self->r = r;
+    self->level = APLOG_NOERRNO|APLOG_ERR;
     self->s = NULL;
 
     return self;
@@ -164,20 +166,16 @@ static void Log_dealloc(LogObject *self)
     if (self->s) {
         if (self->r) {
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
-            ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR,
-                          self->r, "%s", self->s);
+            ap_log_rerror(APLOG_MARK, self->level, self->r, "%s", self->s);
 #else
-            ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR,
-                          0, self->r, "%s", self->s);
+            ap_log_rerror(APLOG_MARK, self->level, 0, self->r, "%s", self->s);
 #endif
         }
         else {
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
-            ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR,
-                          0, "%s", self->s);
+            ap_log_error(APLOG_MARK, self->level, 0, "%s", self->s);
 #else
-            ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR,
-                          0, 0, "%s", self->s);
+            ap_log_error(APLOG_MARK, self->level, 0, 0, "%s", self->s);
 #endif
         }
 
@@ -195,20 +193,16 @@ static PyObject *Log_flush(LogObject *self, PyObject *args)
     if (self->s) {
         if (self->r) {
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
-            ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR,
-                          self->r, "%s", self->s);
+            ap_log_rerror(APLOG_MARK, self->level, self->r, "%s", self->s);
 #else
-            ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR,
-                          0, self->r, "%s", self->s);
+            ap_log_rerror(APLOG_MARK, self->level, 0, self->r, "%s", self->s);
 #endif
         }
         else {
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
-            ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR,
-                          0, "%s", self->s);
+            ap_log_error(APLOG_MARK, self->level, 0, "%s", self->s);
 #else
-            ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR,
-                          0, 0, "%s", self->s);
+            ap_log_error(APLOG_MARK, self->level, 0, 0, "%s", self->s);
 #endif
         }
 
@@ -249,20 +243,16 @@ static void Log_output(LogObject *self, const char *msg)
 
             if (self->r) {
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
-                ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR,
-                              self->r, "%s", s);
+                ap_log_rerror(APLOG_MARK, self->level, self->r, "%s", s);
 #else
-                ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR,
-                              0, self->r, "%s", s);
+                ap_log_rerror(APLOG_MARK, self->level, 0, self->r, "%s", s);
 #endif
             }
             else {
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
-                ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR,
-                              0, "%s", s);
+                ap_log_error(APLOG_MARK, self->level, 0, "%s", s);
 #else
-                ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR,
-                              0, 0, "%s", s);
+                ap_log_error(APLOG_MARK, self->level, 0, 0, "%s", s);
 #endif
             }
 
@@ -283,20 +273,16 @@ static void Log_output(LogObject *self, const char *msg)
 
             if (self->r) {
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
-                ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR,
-                              self->r, "%s", s);
+                ap_log_rerror(APLOG_MARK, self->level, self->r, "%s", s);
 #else
-                ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR,
-                              0, self->r, "%s", s);
+                ap_log_rerror(APLOG_MARK, self->level, 0, self->r, "%s", s);
 #endif
             }
             else {
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
-                ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR,
-                              0, "%s", s);
+                ap_log_error(APLOG_MARK, self->level, 0, "%s", s);
 #else
-                ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR,
-                              0, 0, "%s", s);
+                ap_log_error(APLOG_MARK, self->level, 0, 0, "%s", s);
 #endif
             }
 
@@ -1240,7 +1226,8 @@ typedef struct {
 
 static PyTypeObject Adapter_Type;
 
-static AdapterObject *newAdapterObject(request_rec *r, const char *interpreter,
+static AdapterObject *newAdapterObject(request_rec *r, LogObject *log,
+                                       const char *interpreter,
                                        const char *callable, int reloading,
                                        int buffering)
 {
@@ -1258,7 +1245,9 @@ static AdapterObject *newAdapterObject(request_rec *r, const char *interpreter,
     self->status = -1;
     self->headers = NULL;
     self->sequence = NULL;
-    self->log = NULL;
+
+    self->log = log;
+    Py_INCREF(self->log);
 
     return self;
 }
@@ -1267,7 +1256,8 @@ static void Adapter_dealloc(AdapterObject *self)
 {
     Py_XDECREF(self->headers);
     Py_XDECREF(self->sequence);
-    Py_XDECREF(self->log);
+
+    Py_DECREF(self->log);
 
     PyObject_Del(self);
 }
@@ -1526,8 +1516,6 @@ static PyObject *Adapter_environ(AdapterObject *self)
      * reference to log object as keep reference to it.
      */
 
-    self->log = newLogObject(r);
-
     object = (PyObject *)self->log;
     PyDict_SetItemString(environ, "wsgi.errors", object);
 
@@ -1719,10 +1707,12 @@ static WSGIServerConfig *wsgi_server_config = NULL;
 
 static PyObject *wsgi_signal_intercept(PyObject *self, PyObject *args)
 {
-    PyObject *o = NULL;
+    PyObject *h = NULL;
     int n = 0;
 
-    if (!PyArg_ParseTuple(args, "iO:signal", &n, &o))
+    PyObject *m = NULL;
+
+    if (!PyArg_ParseTuple(args, "iO:signal", &n, &h))
         return NULL;
 
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
@@ -1735,9 +1725,32 @@ static PyObject *wsgi_signal_intercept(PyObject *self, PyObject *args)
                  "signal %d ignored.", getpid(), n);
 #endif
 
-    Py_INCREF(o);
+    m = PyImport_ImportModule("traceback");
 
-    return o;
+    if (m) {
+        PyObject *d = NULL;
+        PyObject *o = NULL;
+        d = PyModule_GetDict(m);
+        o = PyDict_GetItemString(d, "print_stack");
+        if (o) {
+            PyObject *log = NULL;
+            PyObject *args = NULL;
+            PyObject *result = NULL;
+            log = (PyObject *)newLogObject(NULL);
+            args = Py_BuildValue("(OO)", Py_None, log);
+            result = PyEval_CallObject(o, args);
+            Py_XDECREF(result);
+            Py_DECREF(args);
+            Py_DECREF(log);
+        }
+        Py_DECREF(o);
+    }
+
+    Py_INCREF(m);
+
+    Py_INCREF(h);
+
+    return h;
 }
 
 static PyMethodDef wsgi_signal_method[] = {
@@ -1937,6 +1950,7 @@ static PyThreadState *wsgi_acquire_interpreter(const char *name)
          */
 
         tstate = Py_NewInterpreter();
+
         interp = tstate->interp;
 
         handle = PyCObject_FromVoidPtr((void *)interp, NULL);
@@ -2256,7 +2270,7 @@ static apr_status_t wsgi_python_child_cleanup(void *data)
 
             /* Invoke sys.exitfunc() for interpreter. */
 
-            PyObject *exitfunc = PySys_GetObject("exitfunc");
+            exitfunc = PySys_GetObject("exitfunc");
 
             if (exitfunc) {
                 PyObject *res;
@@ -2279,7 +2293,7 @@ static apr_status_t wsgi_python_child_cleanup(void *data)
                         PyErr_Clear();
                     }
                     else {
-                        PyObject *module = NULL;
+                        PyObject *m = NULL;
                         PyObject *result = NULL;
 
                         PyObject *type = NULL;
@@ -2300,12 +2314,12 @@ static apr_status_t wsgi_python_child_cleanup(void *data)
 
                         PyErr_Fetch(&type, &value, &traceback);
 
-                        module = PyImport_ImportModule("traceback");
+                        m = PyImport_ImportModule("traceback");
 
-                        if (module) {
+                        if (m) {
                             PyObject *d = NULL;
                             PyObject *o = NULL;
-                            d = PyModule_GetDict(module);
+                            d = PyModule_GetDict(m);
                             o = PyDict_GetItemString(d, "print_exception");
                             if (o) {
                                 PyObject *log = NULL;
@@ -2321,6 +2335,8 @@ static apr_status_t wsgi_python_child_cleanup(void *data)
                         }
 
                         if (!result) {
+                            /* Must resort to using PyErr_Print(). */
+
                             PyErr_Restore(type, value, traceback);
 
                             PyErr_Print();
@@ -2335,9 +2351,10 @@ static apr_status_t wsgi_python_child_cleanup(void *data)
 
                         Py_XDECREF(result);
 
-                        Py_DECREF(module);
+                        Py_DECREF(m);
                     }
                 }
+                Py_DECREF(res);
                 Py_DECREF(exitfunc);
             }
 
@@ -3121,6 +3138,8 @@ static int wsgi_hook_handler(request_rec *r)
     PyThreadState *tstate = NULL;
     PyObject *module = NULL;
 
+    LogObject *log = NULL;
+
     /*
      * Only process requests for this module. Honour a content
      * type here because mod_rewrite prior to Apache 2.2 only
@@ -3212,6 +3231,10 @@ static int wsgi_hook_handler(request_rec *r)
 
     wsgi_build_environment(r);
 
+    /* Construct a log object for the request. */
+
+    log = newLogObject(r);
+
     /* Determine values of configuration settings. */
 
     interpreter = dconfig->interpreter;
@@ -3266,7 +3289,7 @@ static int wsgi_hook_handler(request_rec *r)
             Py_INCREF(object);
 
             AdapterObject *adapter = NULL;
-            adapter = newAdapterObject(r, interpreter, callable,
+            adapter = newAdapterObject(r, log, interpreter, callable,
                                        reloading, buffering);
 
             if (adapter)
@@ -3302,6 +3325,8 @@ static int wsgi_hook_handler(request_rec *r)
     }
 
     Py_XDECREF(module);
+
+    Py_DECREF(log);
 
     wsgi_release_interpreter(tstate);
 
