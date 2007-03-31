@@ -1531,6 +1531,10 @@ static PyObject *Adapter_environ(AdapterObject *self)
     PyDict_SetItemString(environ, "mod_wsgi.application_group", object);
     Py_DECREF(object);
 
+    object = PyString_FromString(self->interpreter);
+    PyDict_SetItemString(environ, "mod_wsgi.interpreter_name", object);
+    Py_DECREF(object);
+
     object = PyString_FromString(self->callable);
     PyDict_SetItemString(environ, "mod_wsgi.script_callable", object);
     Py_DECREF(object);
