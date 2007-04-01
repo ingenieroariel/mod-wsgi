@@ -1794,7 +1794,7 @@ static InterpreterObject *newInterpreterObject(const char *name,
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
         ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0,
                      "mod_wsgi (pid=%d): Attach interpreter '%s'.",
-                     getpud(), name);
+                     getpid(), name);
 #else
         ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, 0,
                      "mod_wsgi (pid=%d): Attach interpreter '%s'.",
