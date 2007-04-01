@@ -115,6 +115,8 @@ typedef struct {
     int xsignal;
 } WSGIServerConfig;
 
+static WSGIServerConfig *wsgi_server_config = NULL;
+
 static WSGIServerConfig *newWSGIServerConfig(apr_pool_t *p)
 {
     WSGIServerConfig *object = NULL;
@@ -411,85 +413,6 @@ static PyTypeObject Log_Type = {
     0,                      /*tp_iter*/
     0,                      /*tp_iternext*/
     Log_methods,            /*tp_methods*/
-    0,                      /*tp_members*/
-    0,                      /*tp_getset*/
-    0,                      /*tp_base*/
-    0,                      /*tp_dict*/
-    0,                      /*tp_descr_get*/
-    0,                      /*tp_descr_set*/
-    0,                      /*tp_dictoffset*/
-    0,                      /*tp_init*/
-    0,                      /*tp_alloc*/
-    0,                      /*tp_new*/
-    0,                      /*tp_free*/
-    0,                      /*tp_is_gc*/
-};
-
-typedef struct {
-    PyObject_HEAD
-    const char *s;
-} RestrictedObject;
-
-static PyTypeObject Restricted_Type;
-
-static RestrictedObject *newRestrictedObject(const char *s)
-{
-    RestrictedObject *self;
-
-    self = PyObject_New(RestrictedObject, &Restricted_Type);
-    if (self == NULL)
-        return NULL;
-
-    self->s = s;
-
-    return self;
-}
-
-static void Restricted_dealloc(RestrictedObject *self)
-{
-    PyObject_Del(self);
-}
-
-static PyObject *Restricted_getattr(RestrictedObject *self, char *name)
-{
-    PyErr_Format(PyExc_IOError, "%s access restricted by mod_wsgi", self->s);
-
-    return NULL;
-}
-
-static PyTypeObject Restricted_Type = {
-    /* The ob_type field must be initialized in the module init function
-     * to be portable to Windows without using C++. */
-    PyObject_HEAD_INIT(NULL)
-    0,                      /*ob_size*/
-    "mod_wsgi.Restricted",  /*tp_name*/
-    sizeof(RestrictedObject), /*tp_basicsize*/
-    0,                      /*tp_itemsize*/
-    /* methods */
-    (destructor)Restricted_dealloc, /*tp_dealloc*/
-    0,                      /*tp_print*/
-    (getattrfunc)Restricted_getattr, /*tp_getattr*/
-    0,                      /*tp_setattr*/
-    0,                      /*tp_compare*/
-    0,                      /*tp_repr*/
-    0,                      /*tp_as_number*/
-    0,                      /*tp_as_sequence*/
-    0,                      /*tp_as_mapping*/
-    0,                      /*tp_hash*/
-    0,                      /*tp_call*/
-    0,                      /*tp_str*/
-    0,                      /*tp_getattro*/
-    0,                      /*tp_setattro*/
-    0,                      /*tp_as_buffer*/
-    Py_TPFLAGS_DEFAULT,     /*tp_flags*/
-    0,                      /*tp_doc*/
-    0,                      /*tp_traverse*/
-    0,                      /*tp_clear*/
-    0,                      /*tp_richcompare*/
-    0,                      /*tp_weaklistoffset*/
-    0,                      /*tp_iter*/
-    0,                      /*tp_iternext*/
-    0,                      /*tp_methods*/
     0,                      /*tp_members*/
     0,                      /*tp_getset*/
     0,                      /*tp_base*/
@@ -1693,23 +1616,88 @@ static PyTypeObject Adapter_Type = {
     0,                      /*tp_is_gc*/
 };
 
-/*
- * Startup and shutdown of Python interpreter. In mod_wsgi if
- * the Python interpreter hasn't been initialised by another
- * Apache module such as mod_python, we will take control and
- * initialise it. Need to remember that we initialised Python as
- * in doing that we also take responsibility for performing
- * special Python fixups after Apache is forked and child
- * process has run.
- */
+/* Restricted object to stop access to STDIN/STDOUT. */
 
-static int wsgi_python_initialised = 0;
+typedef struct {
+    PyObject_HEAD
+    const char *s;
+} RestrictedObject;
 
-#if AP_SERVER_MAJORVERSION_NUMBER >= 2
-static apr_pool_t *wsgi_server_pool = NULL;
-#endif
+static PyTypeObject Restricted_Type;
 
-static WSGIServerConfig *wsgi_server_config = NULL;
+static RestrictedObject *newRestrictedObject(const char *s)
+{
+    RestrictedObject *self;
+
+    self = PyObject_New(RestrictedObject, &Restricted_Type);
+    if (self == NULL)
+        return NULL;
+
+    self->s = s;
+
+    return self;
+}
+
+static void Restricted_dealloc(RestrictedObject *self)
+{
+    PyObject_Del(self);
+}
+
+static PyObject *Restricted_getattr(RestrictedObject *self, char *name)
+{
+    PyErr_Format(PyExc_IOError, "%s access restricted by mod_wsgi", self->s);
+
+    return NULL;
+}
+
+static PyTypeObject Restricted_Type = {
+    /* The ob_type field must be initialized in the module init function
+     * to be portable to Windows without using C++. */
+    PyObject_HEAD_INIT(NULL)
+    0,                      /*ob_size*/
+    "mod_wsgi.Restricted",  /*tp_name*/
+    sizeof(RestrictedObject), /*tp_basicsize*/
+    0,                      /*tp_itemsize*/
+    /* methods */
+    (destructor)Restricted_dealloc, /*tp_dealloc*/
+    0,                      /*tp_print*/
+    (getattrfunc)Restricted_getattr, /*tp_getattr*/
+    0,                      /*tp_setattr*/
+    0,                      /*tp_compare*/
+    0,                      /*tp_repr*/
+    0,                      /*tp_as_number*/
+    0,                      /*tp_as_sequence*/
+    0,                      /*tp_as_mapping*/
+    0,                      /*tp_hash*/
+    0,                      /*tp_call*/
+    0,                      /*tp_str*/
+    0,                      /*tp_getattro*/
+    0,                      /*tp_setattro*/
+    0,                      /*tp_as_buffer*/
+    Py_TPFLAGS_DEFAULT,     /*tp_flags*/
+    0,                      /*tp_doc*/
+    0,                      /*tp_traverse*/
+    0,                      /*tp_clear*/
+    0,                      /*tp_richcompare*/
+    0,                      /*tp_weaklistoffset*/
+    0,                      /*tp_iter*/
+    0,                      /*tp_iternext*/
+    0,                      /*tp_methods*/
+    0,                      /*tp_members*/
+    0,                      /*tp_getset*/
+    0,                      /*tp_base*/
+    0,                      /*tp_dict*/
+    0,                      /*tp_descr_get*/
+    0,                      /*tp_descr_set*/
+    0,                      /*tp_dictoffset*/
+    0,                      /*tp_init*/
+    0,                      /*tp_alloc*/
+    0,                      /*tp_new*/
+    0,                      /*tp_free*/
+    0,                      /*tp_is_gc*/
+};
+
+/* Function to restrict access to use of signal(). */
 
 static PyObject *wsgi_signal_intercept(PyObject *self, PyObject *args)
 {
@@ -1763,6 +1751,378 @@ static PyMethodDef wsgi_signal_method[] = {
     { "signal", (PyCFunction)wsgi_signal_intercept, METH_VARARGS, 0 },
     { NULL, NULL }
 };
+
+/* Wrapper around Python interpreter instances. */
+
+typedef struct {
+    PyObject_HEAD
+    char *name;
+    PyInterpreterState *interp;
+    int owner;
+} InterpreterObject;
+
+static PyTypeObject Interpreter_Type;
+
+static InterpreterObject *newInterpreterObject(const char *name,
+                                               PyInterpreterState *interp)
+{
+    InterpreterObject *self;
+    PyThreadState *tstate = NULL;
+    PyThreadState *save_tstate = NULL;
+    PyObject *module = NULL;
+    PyObject *object = NULL;
+    PyObject *item = NULL;
+
+    self = PyObject_New(InterpreterObject, &Interpreter_Type);
+    if (self == NULL)
+        return NULL;
+
+    /* Remember active thread state so can restore it. */
+
+    save_tstate = PyThreadState_Swap(NULL);
+
+    /* Save away the name purely for logging purposes. */
+
+    self->name = strdup(name);
+
+    if (interp) {
+        /*
+	 * Interpreter provided to us so will not be
+	 * responsible for deleting it later.
+         */
+
+#if AP_SERVER_MAJORVERSION_NUMBER < 2
+        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0,
+                     "mod_wsgi (pid=%d): Attach interpreter '%s'.",
+                     getpud(), name);
+#else
+        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, 0,
+                     "mod_wsgi (pid=%d): Attach interpreter '%s'.",
+                     getpid(), name);
+#endif
+
+        self->interp = interp;
+        self->owner = 0;
+
+        /*
+         * Need though now to create a thread state
+         * against the interpreter so we can preload
+         * it with our modules and fixups.
+         */
+
+        tstate = PyThreadState_New(self->interp);
+        PyThreadState_Swap(tstate);
+    }
+    else {
+        /*
+	 * Create the interpreter. If creation of the
+	 * interpreter fails it will restore the
+	 * existing active thread state for us so don't
+	 * need to worry about it in that case.
+         */
+
+#if AP_SERVER_MAJORVERSION_NUMBER < 2
+        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0,
+                     "mod_wsgi (pid=%d): Create interpreter '%s'.",
+                     getpid(), name);
+#else
+        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, 0,
+                     "mod_wsgi (pid=%d): Create interpreter '%s'.",
+                     getpid(), name);
+#endif
+
+        tstate = Py_NewInterpreter();
+
+        if (!tstate) {
+            PyErr_SetString(PyExc_RuntimeError, "Py_NewInterpreter() failed");
+
+            Py_DECREF(self);
+
+            return NULL;
+        }
+
+        self->interp = tstate->interp;
+    }
+
+    /*
+     * Create mod_wsgi Python module. Only put the
+     * version in this for now. Might use it later
+     * on for interpreter specific information.
+     */
+
+    module = PyImport_AddModule("mod_wsgi");
+
+    PyModule_AddObject(module, "version", Py_BuildValue("(ii)",
+                       MOD_WSGI_MAJORVERSION_NUMBER,
+                       MOD_WSGI_MINORVERSION_NUMBER));
+
+    /*
+     * Install restricted objects for STDIN and STDOUT,
+     * or log object for STDOUT as appropriate.
+     */
+
+    object = (PyObject *)newLogObject(NULL);
+    PySys_SetObject("stderr", object);
+    Py_DECREF(object);
+
+    if (wsgi_server_config->xstdout != 0) {
+        object = (PyObject *)newRestrictedObject("sys.stdout");
+        PySys_SetObject("stdout", object);
+        Py_DECREF(object);
+    }
+    else {
+        object = (PyObject *)newLogObject(NULL);
+        PySys_SetObject("stdout", object);
+        Py_DECREF(object);
+    }
+
+    if (wsgi_server_config->xstdin != 0) {
+        object = (PyObject *)newRestrictedObject("sys.stdin");
+        PySys_SetObject("stdin", object);
+        Py_DECREF(object);
+    }
+
+    /*
+     * Set sys.argv to one element list to fake out
+     * modules that look there for Python command
+     * line arguments as appropriate.
+     */
+
+    object = PyList_New(0);
+    item = PyString_FromString("mod_wsgi");
+    PyList_Append(object, item);
+    PySys_SetObject("argv", object);
+    Py_DECREF(item);
+    Py_DECREF(object);
+
+    /*
+     * Install intercept for signal handler registration
+     * if appropriate.
+     */
+
+    if (wsgi_server_config->xsignal != 0) {
+        module = PyImport_ImportModule("signal");
+        PyModule_AddObject(module, "signal", PyCFunction_New(
+                           &wsgi_signal_method[0], NULL));
+        Py_DECREF(module);
+    }
+
+    PyThreadState_Clear(tstate);
+    PyThreadState_Swap(save_tstate);
+    PyThreadState_Delete(tstate);
+
+    return self;
+}
+
+static void Interpreter_dealloc(InterpreterObject *self)
+{
+    PyThreadState *tstate = NULL;
+    PyThreadState *save_tstate = NULL;
+    PyObject *exitfunc = NULL;
+
+    save_tstate = PyThreadState_Swap(NULL);
+
+    tstate = PyThreadState_New(self->interp);
+    PyThreadState_Swap(tstate);
+
+    if (self->owner) {
+#if AP_SERVER_MAJORVERSION_NUMBER < 2
+        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0,
+                     "mod_wsgi (pid=%d): Destroy interpreter '%s'.",
+                     getpid(), self->name);
+#else
+        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, 0,
+                     "mod_wsgi (pid=%d): Destroy interpreter '%s'.",
+                     getpid(), self->name);
+#endif
+    }
+    else {
+#if AP_SERVER_MAJORVERSION_NUMBER < 2
+        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0,
+                     "mod_wsgi (pid=%d): Cleanup interpreter '%s'.",
+                     getpid(), self->name);
+#else
+        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, 0,
+                     "mod_wsgi (pid=%d): Cleanup interpreter '%s'.",
+                     getpid(), self->name);
+#endif
+    }
+
+    /* Invoke sys.exitfunc(). */
+
+    exitfunc = PySys_GetObject("exitfunc");
+
+    if (exitfunc) {
+        PyObject *res;
+        Py_INCREF(exitfunc);
+        PySys_SetObject("exitfunc", (PyObject *)NULL);
+        res = PyEval_CallObject(exitfunc, (PyObject *)NULL);
+        if (res == NULL) {
+            PyObject *m = NULL;
+            PyObject *result = NULL;
+
+            PyObject *type = NULL;
+            PyObject *value = NULL;
+            PyObject *traceback = NULL;
+
+            if (PyErr_ExceptionMatches(PyExc_SystemExit)) {
+#if AP_SERVER_MAJORVERSION_NUMBER < 2
+                ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE,
+                             0, "mod_wsgi (pid=%d): SystemExit "
+                             "exception raised by sys.exitfunc() "
+                             "ignored.", getpid());
+#else
+                ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE,
+                             0, 0, "mod_wsgi (pid=%d): SystemExit "
+                             "exception raised by sys.exitfunc() "
+                             "ignored.", getpid());
+#endif
+            }
+            else {
+#if AP_SERVER_MAJORVERSION_NUMBER < 2
+                ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE,
+                             0, "mod_wsgi (pid=%d): Exception "
+                             "occurred within sys.exitfunc().",
+                             getpid());
+#else
+                ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE,
+                             0, 0, "mod_wsgi (pid=%d): Exception "
+                             "occurred within sys.exitfunc().",
+                             getpid());
+#endif
+            }
+
+            PyErr_Fetch(&type, &value, &traceback);
+
+            m = PyImport_ImportModule("traceback");
+
+            if (m) {
+                PyObject *d = NULL;
+                PyObject *o = NULL;
+                d = PyModule_GetDict(m);
+                o = PyDict_GetItemString(d, "print_exception");
+                if (o) {
+                    PyObject *log = NULL;
+                    PyObject *args = NULL;
+                    log = (PyObject *)newLogObject(NULL);
+                    args = Py_BuildValue("(OOOOO)", type, value,
+                                         traceback, Py_None, log);
+                    result = PyEval_CallObject(o, args);
+                    Py_DECREF(args);
+                    Py_DECREF(log);
+                }
+                Py_DECREF(o);
+            }
+
+            if (!result) {
+                /*
+                 * If can't output exception and traceback then
+                 * use PyErr_Print to dump out details of the
+                 * exception. For SystemExit though if we do
+                 * that the process will actually be terminated
+                 * so can only clear the exception information
+                 * and keep going.
+                 */
+
+                PyErr_Restore(type, value, traceback);
+
+                if (!PyErr_ExceptionMatches(PyExc_SystemExit)) {
+                    PyErr_Print();
+                    if (Py_FlushLine())
+                        PyErr_Clear();
+                }
+                else {
+                    PyErr_Clear();
+                }
+            }
+            else {
+                Py_XDECREF(type);
+                Py_XDECREF(value);
+                Py_XDECREF(traceback);
+            }
+
+            Py_XDECREF(result);
+
+            Py_DECREF(m);
+        }
+        Py_DECREF(res);
+        Py_DECREF(exitfunc);
+    }
+
+    /* If we own it, we destroy it. */
+
+    if (self->owner)
+        Py_EndInterpreter(tstate);
+
+    free(self->name);
+
+    PyThreadState_Swap(save_tstate);
+
+    PyObject_Del(self);
+}
+
+static PyTypeObject Interpreter_Type = {
+    /* The ob_type field must be initialized in the module init function
+     * to be portable to Windows without using C++. */
+    PyObject_HEAD_INIT(NULL)
+    0,                      /*ob_size*/
+    "mod_wsgi.Interpreter",  /*tp_name*/
+    sizeof(InterpreterObject), /*tp_basicsize*/
+    0,                      /*tp_itemsize*/
+    /* methods */
+    (destructor)Interpreter_dealloc, /*tp_dealloc*/
+    0,                      /*tp_print*/
+    0,                      /*tp_getattr*/
+    0,                      /*tp_setattr*/
+    0,                      /*tp_compare*/
+    0,                      /*tp_repr*/
+    0,                      /*tp_as_number*/
+    0,                      /*tp_as_sequence*/
+    0,                      /*tp_as_mapping*/
+    0,                      /*tp_hash*/
+    0,                      /*tp_call*/
+    0,                      /*tp_str*/
+    0,                      /*tp_getattro*/
+    0,                      /*tp_setattro*/
+    0,                      /*tp_as_buffer*/
+    Py_TPFLAGS_DEFAULT,     /*tp_flags*/
+    0,                      /*tp_doc*/
+    0,                      /*tp_traverse*/
+    0,                      /*tp_clear*/
+    0,                      /*tp_richcompare*/
+    0,                      /*tp_weaklistoffset*/
+    0,                      /*tp_iter*/
+    0,                      /*tp_iternext*/
+    0,                      /*tp_methods*/
+    0,                      /*tp_members*/
+    0,                      /*tp_getset*/
+    0,                      /*tp_base*/
+    0,                      /*tp_dict*/
+    0,                      /*tp_descr_get*/
+    0,                      /*tp_descr_set*/
+    0,                      /*tp_dictoffset*/
+    0,                      /*tp_init*/
+    0,                      /*tp_alloc*/
+    0,                      /*tp_new*/
+    0,                      /*tp_free*/
+    0,                      /*tp_is_gc*/
+};
+
+/*
+ * Startup and shutdown of Python interpreter. In mod_wsgi if
+ * the Python interpreter hasn't been initialised by another
+ * Apache module such as mod_python, we will take control and
+ * initialise it. Need to remember that we initialised Python as
+ * in doing that we also take responsibility for performing
+ * special Python fixups after Apache is forked and child
+ * process has run.
+ */
+
+static int wsgi_python_initialised = 0;
+
+#if AP_SERVER_MAJORVERSION_NUMBER >= 2
+static apr_pool_t *wsgi_server_pool = NULL;
+#endif
 
 static void wsgi_python_version()
 {
@@ -1889,7 +2249,8 @@ static void wsgi_python_init(apr_pool_t *pconf)
 #if AP_SERVER_MAJORVERSION_NUMBER >= 2
         /*
          * Trigger destruction of the Python interpreter in the
-         * parent process on a restart.
+         * parent process on a restart. Can only do this with
+         * Apache 2.0 and later.
          */
 
         if (pconf) {
@@ -1925,10 +2286,7 @@ static PyThreadState *wsgi_acquire_interpreter(const char *name)
 {
     PyThreadState *tstate = NULL;
     PyInterpreterState *interp = NULL;
-    PyObject *handle = NULL;
-    PyObject *object = NULL;
-    PyObject *module = NULL;
-    PyObject *item = NULL;
+    InterpreterObject *item = NULL;
 
     /* In a multithreaded MPM must protect table. */
 
@@ -1942,103 +2300,42 @@ static PyThreadState *wsgi_acquire_interpreter(const char *name)
     PyEval_AcquireLock();
 #endif
 
-    /* Check if already have interpreter instance. */
+    /*
+     * Check if already have interpreter instance and
+     * if not need to create one.
+     */
 
-    handle = PyDict_GetItemString(wsgi_interpreters, name);
+    item = (InterpreterObject *)PyDict_GetItemString(wsgi_interpreters, name);
 
-    if (handle) {
-        interp = (PyInterpreterState *)PyCObject_AsVoidPtr(handle);
-    }
-    else {
-        /*
-         * Need to create interpreter instance. This will
-         * have side affect of creating thread state object
-         * so do not need to create that later.
-         */
+    if (!item) {
+        item = newInterpreterObject(name, NULL);
 
-        tstate = Py_NewInterpreter();
+        if (!item)
+            return NULL;
 
-        interp = tstate->interp;
-
-        handle = PyCObject_FromVoidPtr((void *)interp, NULL);
-        PyDict_SetItemString(wsgi_interpreters, name, handle);
-        Py_DECREF(handle);
-
-        /* Create mod_wsgi Python module within interpreter. */
-
-        module = PyImport_AddModule("mod_wsgi");
-
-        PyModule_AddObject(module, "version", Py_BuildValue("(ii)",
-                           MOD_WSGI_MAJORVERSION_NUMBER,
-                           MOD_WSGI_MINORVERSION_NUMBER));
-
-        /*
-         * Install restricted objects for STDIN and STDOUT,
-         * or log object for STDOUT as appropriate.
-         */
-
-        object = (PyObject *)newLogObject(NULL);
-        PySys_SetObject("stderr", object);
-        Py_DECREF(object);
-
-        if (wsgi_server_config->xstdout != 0) {
-            object = (PyObject *)newRestrictedObject("sys.stdout");
-            PySys_SetObject("stdout", object);
-            Py_DECREF(object);
-        }
-        else {
-            object = (PyObject *)newLogObject(NULL);
-            PySys_SetObject("stdout", object);
-            Py_DECREF(object);
-        }
-
-        if (wsgi_server_config->xstdin != 0) {
-            object = (PyObject *)newRestrictedObject("sys.stdin");
-            PySys_SetObject("stdin", object);
-            Py_DECREF(object);
-        }
-
-        /*
-	 * Set sys.argv to one element list to fake out
-	 * modules that look there for Python command
-	 * line arguments as appropriate.
-         */
-
-        object = PyList_New(0);
-        item = PyString_FromString("mod_wsgi");
-        PyList_Append(object, item);
-        PySys_SetObject("argv", object);
+        PyDict_SetItemString(wsgi_interpreters, name, (PyObject *)item);
         Py_DECREF(item);
-        Py_DECREF(object);
-
-        /*
-	 * Install intercept for signal handler registration if
-	 * appropriate.
-         */
-
-        if (wsgi_server_config->xsignal != 0) {
-            module = PyImport_ImportModule("signal");
-            PyModule_AddObject(module, "signal", PyCFunction_New(
-                               &wsgi_signal_method[0], NULL));
-            Py_DECREF(module);
-        }
     }
 
-    /* Create thread state object if needed. */
+    interp = item->interp;
 
-    if (!tstate) {
+    /*
+     * Create new thread state object. We should only be
+     * getting called where no current active thread
+     * state, so no need to remember the old one.
+     */
+
 #if defined(WITH_THREAD)
-        PyEval_ReleaseLock();
+    PyEval_ReleaseLock();
 #endif
 
-        tstate = PyThreadState_New(interp);
+    tstate = PyThreadState_New(interp);
 
 #if defined(WITH_THREAD)
-        PyEval_AcquireThread(tstate);
+    PyEval_AcquireThread(tstate);
 #else
-        PyThreadState_Swap(tstate);
+    PyThreadState_Swap(tstate);
 #endif
-    }
 
 #if APR_HAS_THREADS
     apr_thread_mutex_unlock(wsgi_interp_lock);
@@ -2230,7 +2527,7 @@ static PyObject *wsgi_import_script(request_rec *r, int reloading,
  * Apache child process initialision and cleanup. Initialise
  * global table containing Python interpreter instances and
  * cache reference to main interpreter. Also register cleanup
- * function to trigger calls of registered atexit callbacks.
+ * function to delete interpreter on process shutdown.
  */
 
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
@@ -2239,15 +2536,7 @@ static void wsgi_python_child_cleanup(void *data)
 static apr_status_t wsgi_python_child_cleanup(void *data)
 #endif
 {
-    PyThreadState *tstate = NULL;
-    PyInterpreterState *interp = NULL;
-
-    PyObject *key = NULL;
-    PyObject *value = NULL;
-    int pos = 0;
-
-    const char *name = NULL;
-    PyObject *exitfunc = NULL;
+    PyObject *object = NULL;
 
     /* In a multithreaded MPM must protect table. */
 
@@ -2255,142 +2544,26 @@ static apr_status_t wsgi_python_child_cleanup(void *data)
     apr_thread_mutex_lock(wsgi_interp_lock);
 #endif
 
-    /*
-     * Loop over interpreters, trigger atexit callbacks and
-     * destroy interpreter for all but the main Python
-     * interpreter.
-     */
-
 #if defined(WITH_THREAD)
     PyEval_AcquireLock();
 #endif
 
-    while (PyDict_Next(wsgi_interpreters, &pos, &key, &value)) {
+    /*
+     * Extract a reference to the main Python interpreter from
+     * interpreters dictionary as want to process that one last.
+     * Will need to add it back into the dictionary later on.
+     */
 
-        name = PyString_AsString(key);
-        interp = (PyInterpreterState *)PyCObject_AsVoidPtr(value);
+    object = PyDict_GetItemString(wsgi_interpreters, "");
+    Py_INCREF(object);
 
-        /* Create thread state object for call. */
+    /*
+     * Remove all items from interpreters dictionary. This will
+     * have side affect of calling any exit functions and
+     * destroying interpreters we own.
+     */
 
-        if (*name) {
-#if defined(WITH_THREAD)
-            PyEval_ReleaseLock();
-#endif
-
-            tstate = PyThreadState_New(interp);
-
-#if defined(WITH_THREAD)
-            PyEval_AcquireThread(tstate);
-#else
-            PyThreadState_Swap(tstate);
-#endif
-
-            /* Invoke sys.exitfunc() for interpreter. */
-
-            exitfunc = PySys_GetObject("exitfunc");
-
-            if (exitfunc) {
-                PyObject *res;
-                Py_INCREF(exitfunc);
-                PySys_SetObject("exitfunc", (PyObject *)NULL);
-                res = PyEval_CallObject(exitfunc, (PyObject *)NULL);
-                if (res == NULL) {
-                    PyObject *m = NULL;
-                    PyObject *result = NULL;
-
-                    PyObject *type = NULL;
-                    PyObject *value = NULL;
-                    PyObject *traceback = NULL;
-
-                    if (PyErr_ExceptionMatches(PyExc_SystemExit)) {
-#if AP_SERVER_MAJORVERSION_NUMBER < 2
-                        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE,
-                                     0, "mod_wsgi (pid=%d): SystemExit "
-                                     "exception raised by sys.exitfunc() "
-                                     "ignored.", getpid());
-#else
-                        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE,
-                                     0, 0, "mod_wsgi (pid=%d): SystemExit "
-                                     "exception raised by sys.exitfunc() "
-                                     "ignored.", getpid());
-#endif
-                    }
-                    else {
-#if AP_SERVER_MAJORVERSION_NUMBER < 2
-                        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE,
-                                     0, "mod_wsgi (pid=%d): Exception "
-                                     "occurred within sys.exitfunc().",
-                                     getpid());
-#else
-                        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE,
-                                     0, 0, "mod_wsgi (pid=%d): Exception "
-                                     "occurred within sys.exitfunc().",
-                                     getpid());
-#endif
-                    }
-
-                    PyErr_Fetch(&type, &value, &traceback);
-
-                    m = PyImport_ImportModule("traceback");
-
-                    if (m) {
-                        PyObject *d = NULL;
-                        PyObject *o = NULL;
-                        d = PyModule_GetDict(m);
-                        o = PyDict_GetItemString(d, "print_exception");
-                        if (o) {
-                            PyObject *log = NULL;
-                            PyObject *args = NULL;
-                            log = (PyObject *)newLogObject(NULL);
-                            args = Py_BuildValue("(OOOOO)", type, value,
-                                                 traceback, Py_None, log);
-                            result = PyEval_CallObject(o, args);
-                            Py_DECREF(args);
-                            Py_DECREF(log);
-                        }
-                        Py_DECREF(o);
-                    }
-
-                    if (!result) {
-                        /*
-                         * If can't output exception and traceback then
-                         * use PyErr_Print to dump out details of the
-                         * exception. For SystemExit though if we do
-                         * that the process will actually be terminated
-                         * so can only clear the exception information
-                         * and keep going.
-                         */
-
-                        PyErr_Restore(type, value, traceback);
-
-                        if (!PyErr_ExceptionMatches(PyExc_SystemExit)) {
-                            PyErr_Print();
-                            if (Py_FlushLine())
-                                PyErr_Clear();
-                        }
-                        else {
-                            PyErr_Clear();
-                        }
-                    }
-                    else {
-                        Py_XDECREF(type);
-                        Py_XDECREF(value);
-                        Py_XDECREF(traceback);
-                    }
-
-                    Py_XDECREF(result);
-
-                    Py_DECREF(m);
-                }
-                Py_DECREF(res);
-                Py_DECREF(exitfunc);
-            }
-
-            /* Destroy the interpreter. */
-
-            Py_EndInterpreter(tstate);
-        }
-    }
+    PyDict_Clear(wsgi_interpreters);
 
 #if APR_HAS_THREADS
     apr_thread_mutex_unlock(wsgi_interp_lock);
@@ -2402,21 +2575,35 @@ static apr_status_t wsgi_python_child_cleanup(void *data)
 
     /*
      * Destroy Python itself including the main interpreter.
-     * This will call atexit callbacks for the main interpreter.
-     * If mod_python is being loaded it is left to mod_python
-     * to destroy mod_python, although it currently doesn't
-     * do that and so atexit callbacks will not be called for
-     * main interpreter in that case.
+     * This will trigger exit functions for the main interpreter
+     * If mod_python is being loaded it is left to mod_python to
+     * destroy mod_python, although it currently doesn't do that
+     * and so exit functions will not be called for main
+     * interpreter in that case.
      */
 
-    if (wsgi_python_initialised) {
-        wsgi_acquire_interpreter("");
+    PyDict_SetItemString(wsgi_interpreters, "", object);
+    Py_DECREF(object);
 
-        Py_Finalize();
+    if (wsgi_python_initialised) {
+        if (wsgi_acquire_interpreter("")) {
+
+#if AP_SERVER_MAJORVERSION_NUMBER < 2
+            ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0,
+                         "mod_wsgi (pid=%d): Cleanup interpreter ''.",
+                         getpid());
+#else
+            ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, 0,
+                         "mod_wsgi (pid=%d): Cleanup interpreter ''.",
+                         getpid());
+#endif
+
+            Py_Finalize();
 
 #if defined(WITH_THREAD)
-        PyEval_ReleaseLock();
+            PyEval_ReleaseLock();
 #endif
+        }
     }
 
 #if AP_SERVER_MAJORVERSION_NUMBER >= 2
@@ -2427,12 +2614,10 @@ static apr_status_t wsgi_python_child_cleanup(void *data)
 static void wsgi_python_child_init(apr_pool_t *p)
 {
     PyInterpreterState *interp = NULL;
-    PyThreadState *tstate_active = NULL;
-    PyThreadState *tstate_inactive = NULL;
+    PyThreadState *tstate = NULL;
+    PyThreadState *save_tstate = NULL;
 
     PyObject *object = NULL;
-    PyObject *module = NULL;
-    PyObject *item = NULL;
 
     /* Working with Python, so must acquire GIL. */
 
@@ -2449,8 +2634,8 @@ static void wsgi_python_child_init(apr_pool_t *p)
     while (interp->next)
         interp = interp->next;
 
-    tstate_active = PyThreadState_New(interp);
-    tstate_inactive = PyThreadState_Swap(tstate_active);
+    tstate = PyThreadState_New(interp);
+    save_tstate = PyThreadState_Swap(tstate);
 
     /*
      * Trigger any special Python stuff required after a fork.
@@ -2465,9 +2650,10 @@ static void wsgi_python_child_init(apr_pool_t *p)
     /* Finalise any Python objects required by child process. */
 
     PyType_Ready(&Log_Type);
-    PyType_Ready(&Restricted_Type);
     PyType_Ready(&Input_Type);
     PyType_Ready(&Adapter_Type);
+    PyType_Ready(&Restricted_Type);
+    PyType_Ready(&Interpreter_Type);
 
     /* Initialise Python interpreter instance table and lock. */
 
@@ -2487,73 +2673,15 @@ static void wsgi_python_child_init(apr_pool_t *p)
      * properly.
      */
 
-    object = PyCObject_FromVoidPtr((void *)interp, NULL);
+    object = (PyObject *)newInterpreterObject("", interp);
     PyDict_SetItemString(wsgi_interpreters, "", object);
     Py_DECREF(object);
 
-    /* Create mod_wsgi Python module within main interpreter. */
-
-    module = PyImport_AddModule("mod_wsgi");
-
-    PyModule_AddObject(module, "version", Py_BuildValue("(ii)",
-                       MOD_WSGI_MAJORVERSION_NUMBER,
-                       MOD_WSGI_MINORVERSION_NUMBER));
-
-    /*
-     * Install restricted objects for STDIN and STDOUT,
-     * or log object for STDOUT as appropriate.
-     */
-
-    object = (PyObject *)newLogObject(NULL);
-    PySys_SetObject("stderr", object);
-    Py_DECREF(object);
-
-    if (wsgi_server_config->xstdout != 0) {
-        object = (PyObject *)newRestrictedObject("sys.stdout");
-        PySys_SetObject("stdout", object);
-        Py_DECREF(object);
-    }
-    else {
-        object = (PyObject *)newLogObject(NULL);
-        PySys_SetObject("stdout", object);
-        Py_DECREF(object);
-    }
-
-    if (wsgi_server_config->xstdin != 0) {
-        object = (PyObject *)newRestrictedObject("sys.stdin");
-        PySys_SetObject("stdin", object);
-        Py_DECREF(object);
-    }
-
-    /*
-     * Set sys.argv to one element list to fake out
-     * modules that look there for Python command
-     * line arguments as appropriate.
-     */
-
-    object = PyList_New(0);
-    item = PyString_FromString("mod_wsgi");
-    PyList_Append(object, item);
-    PySys_SetObject("argv", object);
-    Py_DECREF(item);
-    Py_DECREF(object);
-
-    /*
-     * Install intercept for signal handler registration if
-     * appropriate.
-     */
-
-    if (wsgi_server_config->xsignal != 0) {
-        module = PyImport_ImportModule("signal");
-        PyModule_AddObject(module, "signal", PyCFunction_New(
-                           &wsgi_signal_method[0], NULL));
-        Py_DECREF(module);
-    }
-
     /* Restore the prior thread state and release the GIL. */
 
-    PyThreadState_Swap(tstate_inactive);
-    PyThreadState_Delete(tstate_active);
+    PyThreadState_Clear(tstate);
+    PyThreadState_Swap(save_tstate);
+    PyThreadState_Delete(tstate);
 
 #if defined(WITH_THREAD)
     PyEval_ReleaseLock();
@@ -3291,10 +3419,6 @@ static int wsgi_hook_handler(request_rec *r)
 
     wsgi_build_environment(r);
 
-    /* Construct a log object for the request. */
-
-    log = newLogObject(r);
-
     /* Determine values of configuration settings. */
 
     interpreter = dconfig->interpreter;
@@ -3333,6 +3457,20 @@ static int wsgi_hook_handler(request_rec *r)
      */
 
     tstate = wsgi_acquire_interpreter(interpreter);
+
+    if (!tstate) {
+        wsgi_log_script_error(r, "Cannot acquire Python interpreter",
+                              r->filename);
+
+        if (Py_FlushLine())
+            PyErr_Clear();
+
+        return HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    /* Construct a log object to be used for the request. */
+
+    log = newLogObject(r);
 
     /* Import module containing target wsgi application. */
 
