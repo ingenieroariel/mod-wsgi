@@ -1842,6 +1842,7 @@ static InterpreterObject *newInterpreterObject(const char *name,
         }
 
         self->interp = tstate->interp;
+        self->owner = 1;
     }
 
     /*
