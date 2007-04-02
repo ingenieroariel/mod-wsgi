@@ -109,6 +109,7 @@ typedef struct {
     const char *callable;
     int optimize;
     int reloading;
+    int mechanism;
     int buffering;
     int xstdin;
     int xstdout;
@@ -129,6 +130,7 @@ static WSGIServerConfig *newWSGIServerConfig(apr_pool_t *p)
     object->callable = NULL;
     object->optimize = -1;
     object->reloading = -1;
+    object->mechanism = -1;
     object->buffering = -1;
     object->xstdin = -1;
     object->xstdout = -1;
@@ -1142,6 +1144,7 @@ typedef struct {
         const char *interpreter;
         const char *callable;
         int reloading;
+        int mechanism;
         int buffering;
         int status;
         PyObject *headers;
@@ -1154,7 +1157,7 @@ static PyTypeObject Adapter_Type;
 static AdapterObject *newAdapterObject(request_rec *r, LogObject *log,
                                        const char *interpreter,
                                        const char *callable, int reloading,
-                                       int buffering)
+                                       int mechanism, int buffering)
 {
     AdapterObject *self;
 
@@ -1166,6 +1169,7 @@ static AdapterObject *newAdapterObject(request_rec *r, LogObject *log,
     self->interpreter = interpreter;
     self->callable = callable;
     self->reloading = reloading;
+    self->mechanism = mechanism;
     self->buffering = buffering;
     self->status = -1;
     self->headers = NULL;
@@ -1468,6 +1472,10 @@ static PyObject *Adapter_environ(AdapterObject *self)
     PyDict_SetItemString(environ, "mod_wsgi.script_reloading", object);
     Py_DECREF(object);
 
+    object = PyInt_FromLong(self->mechanism);
+    PyDict_SetItemString(environ, "mod_wsgi.reload_mechanism", object);
+    Py_DECREF(object);
+
     object = PyBool_FromLong(self->buffering);
     PyDict_SetItemString(environ, "mod_wsgi.output_buffering", object);
     Py_DECREF(object);
@@ -1730,6 +1738,7 @@ static PyObject *wsgi_signal_intercept(PyObject *self, PyObject *args)
             PyObject *log = NULL;
             PyObject *args = NULL;
             PyObject *result = NULL;
+            Py_INCREF(o);
             log = (PyObject *)newLogObject(NULL);
             args = Py_BuildValue("(OOO)", Py_None, Py_None, log);
             result = PyEval_CallObject(o, args);
@@ -2283,19 +2292,31 @@ static apr_thread_mutex_t* wsgi_module_lock = NULL;
 
 static PyObject *wsgi_interpreters = NULL;
 
-static PyThreadState *wsgi_acquire_interpreter(const char *name)
+static InterpreterObject *wsgi_acquire_interpreter(const char *name)
 {
     PyThreadState *tstate = NULL;
     PyInterpreterState *interp = NULL;
-    InterpreterObject *item = NULL;
+    InterpreterObject *handle = NULL;
 
-    /* In a multithreaded MPM must protect table. */
+    /*
+     * In a multithreaded MPM must protect the
+     * interpreters table. This lock is only needed to
+     * avoid a secondary thread coming in and creating
+     * the same interpreter if Python releases the GIL
+     * when an interpreter is being created. When
+     * are removing an interpreter from the table in
+     * preparation for reloading, don't need to have
+     * it.
+     */
 
 #if APR_HAS_THREADS
     apr_thread_mutex_lock(wsgi_interp_lock);
 #endif
 
-    /* Acquire Python GIL. */
+    /*
+     * This function should never be called when the
+     * Python GIL is held, so need to acquire it.
+     */
 
 #if defined(WITH_THREAD)
     PyEval_AcquireLock();
@@ -2306,19 +2327,21 @@ static PyThreadState *wsgi_acquire_interpreter(const char *name)
      * if not need to create one.
      */
 
-    item = (InterpreterObject *)PyDict_GetItemString(wsgi_interpreters, name);
+    handle = (InterpreterObject *)PyDict_GetItemString(wsgi_interpreters,
+                                                       name);
 
-    if (!item) {
-        item = newInterpreterObject(name, NULL);
+    if (!handle) {
+        handle = newInterpreterObject(name, NULL);
 
-        if (!item)
+        if (!handle)
             return NULL;
 
-        PyDict_SetItemString(wsgi_interpreters, name, (PyObject *)item);
-        Py_DECREF(item);
+        PyDict_SetItemString(wsgi_interpreters, name, (PyObject *)handle);
     }
+    else
+        Py_INCREF(handle);
 
-    interp = item->interp;
+    interp = handle->interp;
 
     /*
      * Create new thread state object. We should only be
@@ -2342,11 +2365,21 @@ static PyThreadState *wsgi_acquire_interpreter(const char *name)
     apr_thread_mutex_unlock(wsgi_interp_lock);
 #endif
 
-    return tstate;
+    return handle;
 }
 
-static void wsgi_release_interpreter(PyThreadState *tstate)
+static void wsgi_release_interpreter(InterpreterObject *handle)
 {
+    PyThreadState *tstate = NULL;
+ 
+    /*
+     * Need to release and destroy the thread state that
+     * was created against the interpreter. This will
+     * release the GIL.
+     */
+
+    tstate = PyThreadState_Get();
+
     PyThreadState_Clear(tstate);
 
 #if defined(WITH_THREAD)
@@ -2356,51 +2389,125 @@ static void wsgi_release_interpreter(PyThreadState *tstate)
 #endif
 
     PyThreadState_Delete(tstate);
+
+    /*
+     * Need to reacquire the Python GIL just so we can
+     * decrement our reference count to the interpreter
+     * itself. If the interpreter has since been removed
+     * from the table of interpreters this will result
+     * in its destruction if its the last reference.
+     */
+
+#if defined(WITH_THREAD)
+    PyEval_AcquireLock();
+#endif
+
+    Py_DECREF(handle);
+
+#if defined(WITH_THREAD)
+    PyEval_ReleaseLock();
+#endif
 }
 
 /*
  * Code for importing a module from source by absolute path.
  */
 
-static PyObject *wsgi_load_source(const char *name, const char* pathname)
+static PyObject *wsgi_load_source(const char *name, request_rec *r,
+                                  const char *interpreter, int found)
 {
     FILE *fp = NULL;
     PyObject *m = NULL;
     PyObject *co = NULL;
     struct _node *n = NULL;
 
-    if (!(fp = fopen(pathname, "r"))) {
+    if (found) {
+#if AP_SERVER_MAJORVERSION_NUMBER < 2
+        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0,
+                     "mod_wsgi (pid=%d, interpreter='%s'): "
+                     "Reloading WSGI script '%s'.", getpid(),
+                     interpreter, r->filename);
+#else
+        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, 0,
+                     "mod_wsgi (pid=%d, interpreter='%s'): "
+                     "Reloading WSGI script '%s'.", getpid(),
+                     interpreter, r->filename);
+#endif
+    }
+    else {
+#if AP_SERVER_MAJORVERSION_NUMBER < 2
+        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0,
+                     "mod_wsgi (pid=%d, interpreter='%s'): "
+                     "Loading WSGI script '%s'.", getpid(),
+                     interpreter, r->filename);
+#else
+        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, 0,
+                     "mod_wsgi (pid=%d, interpreter='%s'): "
+                     "Loading WSGI script '%s'.", getpid(),
+                     interpreter, r->filename);
+#endif
+    }
+
+    if (!(fp = fopen(r->filename, "r"))) {
         PyErr_SetFromErrno(PyExc_IOError);
         return NULL;
     }
 
-    n = PyParser_SimpleParseFile(fp, pathname, Py_file_input);
+    n = PyParser_SimpleParseFile(fp, r->filename, Py_file_input);
 
     fclose(fp);
 
     if (!n)
         return NULL;
 
-    co = (PyObject *)PyNode_Compile(n, (char *)pathname);
+    co = (PyObject *)PyNode_Compile(n, r->filename);
     PyNode_Free(n);
 
-    m = PyImport_ExecCodeModuleEx((char *)name, co, (char *)pathname);
+    m = PyImport_ExecCodeModuleEx((char *)name, co, r->filename);
     Py_DECREF(co);
+
+    if (m) {
+        PyObject *object = NULL;
+
+#if AP_SERVER_MAJORVERSION_NUMBER < 2
+        object = PyLong_FromLongLong(r->finfo.st_mtime);
+#else
+        object = PyLong_FromLongLong(r->finfo.mtime);
+#endif
+        PyModule_AddObject(m, "__mtime__", object);
+    }
 
     return m;
 }
 
-static PyObject *wsgi_import_script(request_rec *r, int reloading,
-                                    const char *interpreter)
+static int wsgi_reload_required(request_rec *r, PyObject *module)
 {
-    int found = 0;
+    PyObject *dict = NULL;
+    PyObject *object = NULL;
+    apr_time_t mtime = 0;
 
-    PyObject *module = NULL;
+    dict = PyModule_GetDict(module);
+    object = PyDict_GetItemString(dict, "__mtime__");
 
+    if (object) {
+        mtime = PyLong_AsLongLong(object);
+#if AP_SERVER_MAJORVERSION_NUMBER < 2
+        if (mtime != r->finfo.st_mtime)
+            return 1;
+#else
+        if (mtime != r->finfo.mtime)
+            return 1;
+#endif
+    }
+    else
+        return 1;
+
+    return 0;
+}
+
+static char *wsgi_module_name(request_rec *r)
+{
     char *hash = NULL;
-    char *name = NULL;
-
-    PyObject *modules = NULL;
 
     /*
      * Calculate a name for the module using the MD5 of its full
@@ -2409,13 +2516,55 @@ static PyObject *wsgi_import_script(request_rec *r, int reloading,
      */
 
     hash = ap_md5(r->pool, (const unsigned char *)r->filename);
-    name = apr_pstrcat(r->pool, "_mod_wsgi_", hash, NULL);
+    return apr_pstrcat(r->pool, "_mod_wsgi_", hash, NULL);
+}
+
+static int wsgi_execute_script(request_rec *r, const char *interpreter,
+                                     const char *callable, int reloading,
+                                     int mechanism, int buffering)
+{
+    InterpreterObject *interp = NULL;
+    PyObject *modules = NULL;
+    PyObject *module = NULL;
+    LogObject *log = NULL;
+    char *name = NULL;
+    int found = 0;
+
+    int status;
 
     /*
-     * Use the interpreter lock around the check to see if the
-     * module is already loaded and the import of the module to
-     * prevent two request handlers trying to import the module
-     * at the same time.
+     * Acquire the desired python interpreter. Once this is done
+     * it is safe to start manipulating python objects.
+     */
+
+    interp = wsgi_acquire_interpreter(interpreter);
+
+    if (!interp) {
+#if AP_SERVER_MAJORVERSION_NUMBER < 2
+        ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, r,
+                     "mod_wsgi (pid=%d): Cannot acquire interpreter '%s'.",
+                     getpid(), interpreter);
+#else
+        ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, r,
+                     "mod_wsgi (pid=%d): Cannot acquire interpreter '%s'.",
+                     getpid(), interpreter);
+#endif
+
+        if (Py_FlushLine())
+            PyErr_Clear();
+
+        return HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    /* Calculate the Python module name to be used for script. */
+
+    name = wsgi_module_name(r);
+
+    /*
+     * Use a lock around the check to see if the module is
+     * already loaded and the import of the module to prevent
+     * two request handlers trying to import the module at the
+     * same time.
      */
 
 #if APR_HAS_THREADS
@@ -2431,89 +2580,92 @@ static PyObject *wsgi_import_script(request_rec *r, int reloading,
         found = 1;
 
     /*
-     * If module reloading is enabled and the module exists, see
+     * If script reloading is enabled and the module exists, see
      * if it has been modified since the last time it was
-     * accessed and if it has, remove it from the modules
-     * dictionary before reloading it again. If code is
-     * executing within the module at the time, the callers
-     * reference count on the module should ensure it isn't
-     * actually destroyed until it is finished.
+     * accessed. If it has, interpreter reloading is enabled
+     * and it is not the main Python interpreter, we need to
+     * trigger destruction of the interpreter by removing it
+     * from the interpreters table, releasing it and then
+     * reacquiring it. If just script reloading is enabled,
+     * remove the module from the modules dictionary before
+     * reloading it again. If code is executing within the
+     * module at the time, the callers reference count on the
+     * module should ensure it isn't actually destroyed until it
+     * is finished.
      */
 
     if (module && reloading) {
-        PyObject *dict = NULL;
-        PyObject *object = NULL;
-        apr_time_t mtime = 0;
+        if (wsgi_reload_required(r, module)) {
+            if (mechanism == 1 && *interpreter) {
+                /* Remove interpreter from set of interpreters. */
 
-        dict = PyModule_GetDict(module);
-        object = PyDict_GetItemString(dict, "__mtime__");
+                PyDict_DelItemString(wsgi_interpreters, interpreter);
 
-        if (object) {
-            mtime = PyLong_AsLongLong(object);
+                /*
+		 * Release the interpreter. If nothing else is
+		 * making use of it, this will cause it to be
+		 * destroyed immediately. If something was using
+		 * it then it will hang around till the other
+		 * handler has finished using it. This will
+		 * leave us without even the Python GIL being
+		 * locked.
+                 */
+
+                wsgi_release_interpreter(interp);
+
+                /*
+                 * Now reacquire the interpreter. Because we
+                 * removed it from the interpreter set above,
+                 * this will result in it being recreated. This
+                 * also reacquires the Python GIL for us.
+                 */
+
+                interp = wsgi_acquire_interpreter(interpreter);
+
+                if (!interp) {
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
-            if (mtime != r->finfo.st_mtime) {
-                PyDict_DelItemString(modules, name);
-                module = NULL;
-            }
+                    ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, r,
+                                 "mod_wsgi (pid=%d): Cannot acquire "
+                                 "interpreter '%s'.", getpid(), interpreter);
 #else
-            if (mtime != r->finfo.mtime) {
-                PyDict_DelItemString(modules, name);
-                module = NULL;
-            }
+                    ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, r,
+                                 "mod_wsgi (pid=%d): Cannot acquire "
+                                 "interpreter '%s'.", getpid(), interpreter);
 #endif
-        }
-        else {
-            PyDict_DelItemString(modules, name);
+
+                    if (Py_FlushLine())
+                        PyErr_Clear();
+
+#if APR_HAS_THREADS
+                    Py_BEGIN_ALLOW_THREADS
+                    apr_thread_mutex_unlock(wsgi_module_lock);
+                    Py_END_ALLOW_THREADS
+#endif
+
+                    return HTTP_INTERNAL_SERVER_ERROR;
+                }
+
+                found = 0;
+            }
+            else
+                PyDict_DelItemString(modules, name);
+
             module = NULL;
         }
     }
 
-    if (!module) {
-        if (found) {
-#if AP_SERVER_MAJORVERSION_NUMBER < 2
-            ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0,
-                         "mod_wsgi (pid=%d, interpreter='%s'): "
-                         "Reloading WSGI script '%s'.", getpid(),
-                         interpreter, r->filename);
-#else
-            ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, 0,
-                         "mod_wsgi (pid=%d, interpreter='%s'): "
-                         "Reloading WSGI script '%s'.", getpid(),
-                         interpreter, r->filename);
-#endif
-        }
-        else {
-#if AP_SERVER_MAJORVERSION_NUMBER < 2
-            ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0,
-                         "mod_wsgi (pid=%d, interpreter='%s'): "
-                         "Loading WSGI script '%s'.", getpid(),
-                         interpreter, r->filename);
-#else
-            ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, 0,
-                         "mod_wsgi (pid=%d, interpreter='%s'): "
-                         "Loading WSGI script '%s'.", getpid(),
-                         interpreter, r->filename);
-#endif
-        }
+    /*
+     * Load module if not already loaded otherwise ensure
+     * we have a reference to is so it isn't deleted while
+     * it is being used.
+     */
 
-        module = wsgi_load_source(name, r->filename);
-
-        if (module) {
-            PyObject *dict = NULL;
-            PyObject *object = NULL;
-
-            dict = PyModule_GetDict(module);
-#if AP_SERVER_MAJORVERSION_NUMBER < 2
-            object = PyLong_FromLongLong(r->finfo.st_mtime);
-#else
-            object = PyLong_FromLongLong(r->finfo.mtime);
-#endif
-            PyDict_SetItemString(dict, "__mtime__", object);
-            Py_DECREF(object);
-        }
-    }
+    if (!module)
+        module = wsgi_load_source(name, r, interpreter, found);
     else
       Py_INCREF(module);
+
+    /* Safe now to release the module lock. */
 
 #if APR_HAS_THREADS
     Py_BEGIN_ALLOW_THREADS
@@ -2521,7 +2673,166 @@ static PyObject *wsgi_import_script(request_rec *r, int reloading,
     Py_END_ALLOW_THREADS
 #endif
 
-    return module;
+    /* Assume an internal server error unless everything okay. */
+
+    status = HTTP_INTERNAL_SERVER_ERROR;
+
+    /*
+     * Construct a log object to be used for the request or for
+     * dumping out any exception details if couldn't load the
+     * module or run the script.
+     */
+
+    log = newLogObject(r);
+
+    /* Determine if script is executable and execute it. */
+
+    if (module) {
+        PyObject *module_dict = NULL;
+        PyObject *object = NULL;
+
+        module_dict = PyModule_GetDict(module);
+        object = PyDict_GetItemString(module_dict, callable);
+
+        if (object) {
+            Py_INCREF(object);
+
+            AdapterObject *adapter = NULL;
+            adapter = newAdapterObject(r, log, interpreter, callable,
+                                       reloading, mechanism, buffering);
+
+            if (adapter)
+                status = Adapter_run(adapter, object);
+
+            Py_XDECREF((PyObject *)adapter);
+
+            Py_DECREF(object);
+        }
+        else {
+#if AP_SERVER_MAJORVERSION_NUMBER < 2
+            ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, r,
+                          "mod_wsgi (pid=%d): Target WSGI script '%s' does "
+                          "not contain WSGI application '%s'.",
+                          getpid(), r->filename, apr_pstrcat(r->pool,
+                          r->filename, "::", callable, NULL));
+#else
+            ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, r,
+                          "mod_wsgi (pid=%d): Target WSGI script '%s' does "
+                          "not contain WSGI application '%s'.",
+                          getpid(), r->filename, apr_pstrcat(r->pool,
+                          r->filename, "::", callable, NULL));
+#endif
+
+            status = HTTP_NOT_FOUND;
+        }
+    }
+    else {
+#if AP_SERVER_MAJORVERSION_NUMBER < 2
+        ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, r,
+                      "mod_wsgi (pid=%d): Target WSGI script '%s' cannot "
+                      "be loaded as Python module.", getpid(), r->filename);
+#else
+        ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, r,
+                      "mod_wsgi (pid=%d): Target WSGI script '%s' cannot "
+                      "be loaded as Python module.", getpid(), r->filename);
+#endif
+    }
+
+    /* Log any details of exceptions if execution failed. */
+
+    if (PyErr_Occurred()) {
+        PyObject *m = NULL;
+        PyObject *result = NULL;
+
+        PyObject *type = NULL;
+        PyObject *value = NULL;
+        PyObject *traceback = NULL;
+
+        if (PyErr_ExceptionMatches(PyExc_SystemExit)) {
+#if AP_SERVER_MAJORVERSION_NUMBER < 2
+            ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE,
+                         r, "mod_wsgi (pid=%d): SystemExit "
+                         "exception raised by WSGI script "
+                         "'%s' ignored.", getpid(), r->filename);
+#else
+            ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE,
+                         0, r, "mod_wsgi (pid=%d): SystemExit "
+                         "exception raised by WSGI script "
+                         "'%s' ignored.", getpid(), r->filename);
+#endif
+        }
+        else {
+#if AP_SERVER_MAJORVERSION_NUMBER < 2
+            ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE,
+                         r, "mod_wsgi (pid=%d): Exception "
+                         "occurred within WSGI script '%s'.",
+                         getpid(), r->filename);
+#else
+            ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE,
+                         0, r, "mod_wsgi (pid=%d): Exception "
+                         "occurred within WSGI script '%s'.",
+                         getpid(), r->filename);
+#endif
+        }
+
+        PyErr_Fetch(&type, &value, &traceback);
+
+        m = PyImport_ImportModule("traceback");
+
+        if (m) {
+            PyObject *d = NULL;
+            PyObject *o = NULL;
+            d = PyModule_GetDict(m);
+            o = PyDict_GetItemString(d, "print_exception");
+            if (o) {
+                PyObject *args = NULL;
+                args = Py_BuildValue("(OOOOO)", type, value,
+                                     traceback, Py_None, log);
+                result = PyEval_CallObject(o, args);
+                Py_DECREF(args);
+            }
+            Py_DECREF(o);
+        }
+
+        if (!result) {
+            /*
+             * If can't output exception and traceback then
+             * use PyErr_Print to dump out details of the
+             * exception. For SystemExit though if we do
+             * that the process will actually be terminated
+             * so can only clear the exception information
+             * and keep going.
+             */
+
+            PyErr_Restore(type, value, traceback);
+
+            if (!PyErr_ExceptionMatches(PyExc_SystemExit)) {
+                PyErr_Print();
+                if (Py_FlushLine())
+                    PyErr_Clear();
+            }
+            else {
+                PyErr_Clear();
+            }
+        }
+        else {
+            Py_XDECREF(type);
+            Py_XDECREF(value);
+            Py_XDECREF(traceback);
+        }
+
+        Py_XDECREF(result);
+
+        Py_DECREF(m);
+    }
+
+    Py_XDECREF(module);
+
+    Py_DECREF(log);
+
+    wsgi_release_interpreter(interp);
+
+    return status;
 }
 
 /*
@@ -2537,7 +2848,7 @@ static void wsgi_python_child_cleanup(void *data)
 static apr_status_t wsgi_python_child_cleanup(void *data)
 #endif
 {
-    PyObject *object = NULL;
+    PyObject *interp = NULL;
 
     /* In a multithreaded MPM must protect table. */
 
@@ -2555,8 +2866,8 @@ static apr_status_t wsgi_python_child_cleanup(void *data)
      * Will need to add it back into the dictionary later on.
      */
 
-    object = PyDict_GetItemString(wsgi_interpreters, "");
-    Py_INCREF(object);
+    interp = PyDict_GetItemString(wsgi_interpreters, "");
+    Py_INCREF(interp);
 
     /*
      * Remove all items from interpreters dictionary. This will
@@ -2583,12 +2894,11 @@ static apr_status_t wsgi_python_child_cleanup(void *data)
      * interpreter in that case.
      */
 
-    PyDict_SetItemString(wsgi_interpreters, "", object);
-    Py_DECREF(object);
+    PyDict_SetItemString(wsgi_interpreters, "", interp);
+    Py_DECREF(interp);
 
     if (wsgi_python_initialised) {
         if (wsgi_acquire_interpreter("")) {
-
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
             ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0,
                          "mod_wsgi (pid=%d): Cleanup interpreter ''.",
@@ -2754,6 +3064,11 @@ static void *wsgi_merge_server_config(apr_pool_t *p, void *base_conf,
     else
         config->reloading = parent->reloading;
 
+    if (child->mechanism != -1)
+        config->mechanism = child->mechanism;
+    else
+        config->mechanism = parent->mechanism;
+
     if (child->buffering != -1)
         config->buffering = child->buffering;
     else
@@ -2817,6 +3132,11 @@ static void *wsgi_merge_dir_config(apr_pool_t *p, void *base_conf,
         config->reloading = child->reloading;
     else
         config->reloading = parent->reloading;
+
+    if (child->mechanism != -1)
+        config->mechanism = child->mechanism;
+    else
+        config->mechanism = parent->mechanism;
 
     if (child->buffering != -1)
         config->buffering = child->buffering;
@@ -2918,7 +3238,7 @@ static const char *wsgi_callable_directive(cmd_parms *cmd, void *mconfig,
 }
 
 static const char *wsgi_reloading_directive(cmd_parms *cmd, void *mconfig,
-                                                const char *f)
+                                            const char *f)
 {
     if (cmd->path) {
         WSGIServerConfig *dconfig = NULL;
@@ -2930,6 +3250,30 @@ static const char *wsgi_reloading_directive(cmd_parms *cmd, void *mconfig,
         sconfig = ap_get_module_config(cmd->server->module_config,
                                        &wsgi_module);
         sconfig->reloading = !strcasecmp(f, "On");
+    }
+
+    return NULL;
+}
+
+static const char *wsgi_mechanism_directive(cmd_parms *cmd, void *mconfig,
+                                            const char *f)
+{
+    if (cmd->path) {
+        WSGIServerConfig *dconfig = NULL;
+        dconfig = (WSGIServerConfig *)mconfig;
+        if (!strcasecmp(f, "Interpreter"))
+            dconfig->mechanism = 1;
+        else
+            dconfig->mechanism = 0;
+    }
+    else {
+        WSGIServerConfig *sconfig = NULL;
+        sconfig = ap_get_module_config(cmd->server->module_config,
+                                       &wsgi_module);
+        if (!strcasecmp(f, "Interpreter"))
+            sconfig->mechanism = 1;
+        else
+            sconfig->mechanism = 0;
     }
 
     return NULL;
@@ -3322,12 +3666,8 @@ static int wsgi_hook_handler(request_rec *r)
     const char *interpreter = NULL;
     const char *callable = NULL;
     int reloading = -1;
+    int mechanism = -1;
     int buffering = -1;
-
-    PyThreadState *tstate = NULL;
-    PyObject *module = NULL;
-
-    LogObject *log = NULL;
 
     /*
      * Only process requests for this module. Honour a content
@@ -3407,10 +3747,6 @@ static int wsgi_hook_handler(request_rec *r)
     if (status != OK)
         return status;
 
-    /* Assume an internal server error unless everything okay. */
-
-    status = HTTP_INTERNAL_SERVER_ERROR;
-
     /* Get config relevant to this request. */
 
     dconfig = ap_get_module_config(r->per_dir_config, &wsgi_module);
@@ -3444,6 +3780,14 @@ static int wsgi_hook_handler(request_rec *r)
             reloading = 1;
     }
 
+    mechanism = dconfig->mechanism;
+
+    if (mechanism < 0) {
+        mechanism = sconfig->mechanism;
+        if (mechanism < 0)
+            mechanism = 0;
+    }
+
     buffering = dconfig->buffering;
 
     if (buffering < 0) {
@@ -3452,158 +3796,10 @@ static int wsgi_hook_handler(request_rec *r)
             buffering = 0;
     }
 
-    /*
-     * Acquire the desired python interpreter. Once this is done
-     * it is safe to start manipulating python objects.
-     */
+    /* Execute the target WSGI application script. */
 
-    tstate = wsgi_acquire_interpreter(interpreter);
-
-    if (!tstate) {
-        wsgi_log_script_error(r, "Cannot acquire Python interpreter",
-                              r->filename);
-
-        if (Py_FlushLine())
-            PyErr_Clear();
-
-        return HTTP_INTERNAL_SERVER_ERROR;
-    }
-
-    /* Construct a log object to be used for the request. */
-
-    log = newLogObject(r);
-
-    /* Import module containing target wsgi application. */
-
-    module = wsgi_import_script(r, reloading, interpreter);
-
-    if (module) {
-        PyObject *module_dict = NULL;
-        PyObject *object = NULL;
-
-        module_dict = PyModule_GetDict(module);
-        object = PyDict_GetItemString(module_dict, callable);
-
-        if (object) {
-            Py_INCREF(object);
-
-            AdapterObject *adapter = NULL;
-            adapter = newAdapterObject(r, log, interpreter, callable,
-                                       reloading, buffering);
-
-            if (adapter)
-                status = Adapter_run(adapter, object);
-
-            Py_XDECREF((PyObject *)adapter);
-
-            Py_DECREF(object);
-        }
-        else {
-            wsgi_log_script_error(r, "Target WSGI script does not contain "
-                                  "WSGI application", apr_pstrcat(r->pool,
-                                  r->filename, "::", callable, NULL));
-
-            status = HTTP_NOT_FOUND;
-        }
-    }
-    else {
-        wsgi_log_script_error(r, "Target WSGI script cannot be loaded "
-                              "as Python module", r->filename);
-    }
-
-    if (PyErr_Occurred()) {
-        PyObject *m = NULL;
-        PyObject *result = NULL;
-
-        PyObject *type = NULL;
-        PyObject *value = NULL;
-        PyObject *traceback = NULL;
-
-        if (PyErr_ExceptionMatches(PyExc_SystemExit)) {
-#if AP_SERVER_MAJORVERSION_NUMBER < 2
-            ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE,
-                         r, "mod_wsgi (pid=%d): SystemExit "
-                         "exception raised by WSGI script "
-                         "'%s' ignored.", getpid(), r->filename);
-#else
-            ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE,
-                         0, r, "mod_wsgi (pid=%d): SystemExit "
-                         "exception raised by WSGI script "
-                         "'%s' ignored.", getpid(), r->filename);
-#endif
-        }
-        else {
-#if AP_SERVER_MAJORVERSION_NUMBER < 2
-            ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE,
-                         r, "mod_wsgi (pid=%d): Exception "
-                         "occurred within WSGI script '%s'.",
-                         getpid(), r->filename);
-#else
-            ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE,
-                         0, r, "mod_wsgi (pid=%d): Exception "
-                         "occurred within WSGI script '%s'.",
-                         getpid(), r->filename);
-#endif
-        }
-
-        PyErr_Fetch(&type, &value, &traceback);
-
-        m = PyImport_ImportModule("traceback");
-
-        if (m) {
-            PyObject *d = NULL;
-            PyObject *o = NULL;
-            d = PyModule_GetDict(m);
-            o = PyDict_GetItemString(d, "print_exception");
-            if (o) {
-                PyObject *args = NULL;
-                args = Py_BuildValue("(OOOOO)", type, value,
-                                     traceback, Py_None, log);
-                result = PyEval_CallObject(o, args);
-                Py_DECREF(args);
-            }
-            Py_DECREF(o);
-        }
-
-        if (!result) {
-            /*
-             * If can't output exception and traceback then
-             * use PyErr_Print to dump out details of the
-             * exception. For SystemExit though if we do
-             * that the process will actually be terminated
-             * so can only clear the exception information
-             * and keep going.
-             */
-
-            PyErr_Restore(type, value, traceback);
-
-            if (!PyErr_ExceptionMatches(PyExc_SystemExit)) {
-                PyErr_Print();
-                if (Py_FlushLine())
-                    PyErr_Clear();
-            }
-            else {
-                PyErr_Clear();
-            }
-        }
-        else {
-            Py_XDECREF(type);
-            Py_XDECREF(value);
-            Py_XDECREF(traceback);
-        }
-
-        Py_XDECREF(result);
-
-        Py_DECREF(m);
-    }
-
-    Py_XDECREF(module);
-
-    Py_DECREF(log);
-
-    wsgi_release_interpreter(tstate);
-
-    return status;
+    return wsgi_execute_script(r, interpreter, callable, reloading,
+                               mechanism, buffering);
 }
 
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
@@ -3652,6 +3848,8 @@ static const command_rec wsgi_commands[] =
         OR_FILEINFO, TAKE1, "Name of entry point in WSGI script file." },
     { "WSGIScriptReloading", wsgi_reloading_directive, NULL,
         OR_FILEINFO, TAKE1, "Enable/Disable reloading of WSGI script file." },
+    { "WSGIReloadMechanism", wsgi_mechanism_directive, NULL,
+        OR_FILEINFO, TAKE1, "Defines what is reloaded when a reload occurs." },
     { "WSGIOutputBuffering", wsgi_buffering_directive, NULL,
         OR_FILEINFO, TAKE1, "Enable/Disable buffering of response." },
     { "WSGIRestrictStdin", wsgi_restrict_stdin, NULL,
@@ -3755,6 +3953,8 @@ static const command_rec wsgi_commands[] =
         OR_FILEINFO, "Name of entry point in WSGI script file."),
     AP_INIT_TAKE1("WSGIScriptReloading", wsgi_reloading_directive, NULL,
         OR_FILEINFO, "Enable/Disable reloading of WSGI script file."),
+    AP_INIT_TAKE1("WSGIReloadMechanism", wsgi_mechanism_directive, NULL,
+        OR_FILEINFO, "Defines what is reloaded when a reload occurs."),
     AP_INIT_TAKE1("WSGIOutputBuffering", wsgi_buffering_directive, NULL,
         OR_FILEINFO, "Enable/Disable buffering of response."),
     AP_INIT_TAKE1("WSGIRestrictStdin", wsgi_restrict_stdin, NULL,
