@@ -1963,7 +1963,7 @@ static void Interpreter_dealloc(InterpreterObject *self)
     exitfunc = PySys_GetObject("exitfunc");
 
     if (exitfunc) {
-        PyObject *res;
+        PyObject *res = NULL;
         Py_INCREF(exitfunc);
         PySys_SetObject("exitfunc", (PyObject *)NULL);
         res = PyEval_CallObject(exitfunc, (PyObject *)NULL);
@@ -2055,7 +2055,7 @@ static void Interpreter_dealloc(InterpreterObject *self)
 
             Py_DECREF(m);
         }
-        Py_DECREF(res);
+        Py_XDECREF(res);
         Py_DECREF(exitfunc);
     }
 
