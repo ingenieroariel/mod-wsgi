@@ -1929,6 +1929,7 @@ static void Interpreter_dealloc(InterpreterObject *self)
     PyThreadState *tstate = NULL;
     PyThreadState *save_tstate = NULL;
     PyObject *exitfunc = NULL;
+    PyObject *module = NULL;
 
     save_tstate = PyThreadState_Swap(NULL);
 
@@ -1958,7 +1959,44 @@ static void Interpreter_dealloc(InterpreterObject *self)
 #endif
     }
 
-    /* Invoke sys.exitfunc(). */
+    /*
+     * Because the thread state we are using was created outside
+     * of any Python code and is not the same as the Python main
+     * thread, there is no record of it within the 'threading'
+     * module. We thus need to call the 'currentThread()'
+     * function of the 'threading' module to force it to create
+     * a thread handle for the thread. If we do not do this,
+     * then the 'threading' modules exit function will always
+     * fail because it will not be able to find a handle for
+     * this thread.
+     */
+
+    module = PyImport_ImportModule("threading");
+
+    if (module) {
+        PyObject *dict = NULL;
+        PyObject *func = NULL;
+        PyObject *handle = NULL;
+
+        dict = PyModule_GetDict(module);
+        func = PyDict_GetItemString(dict, "currentThread");
+        if (func) {
+            PyObject *args = NULL;
+            PyObject *res = NULL;
+            res = PyEval_CallObject(func, (PyObject *)NULL);
+            if (!res) {
+                PyErr_Clear();
+            }
+            Py_XDECREF(res);
+            Py_DECREF(func);
+        }
+
+        Py_DECREF(module);
+    }
+    else
+        PyErr_Clear();
+
+    /* Invoke exit functions by calling sys.exitfunc(). */
 
     exitfunc = PySys_GetObject("exitfunc");
 
