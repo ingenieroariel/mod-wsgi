@@ -3874,12 +3874,18 @@ void wsgi_hook_init(server_rec *s, apr_pool_t *p)
 {
     char package[128];
 
+    /* Setup module version information. */
+
     sprintf(package, "mod_wsgi/%d.%d-TRUNK", MOD_WSGI_MAJORVERSION_NUMBER,
             MOD_WSGI_MINORVERSION_NUMBER);
 
     ap_add_version_component(package);
 
+    /* Retain reference to main server config. */
+
     wsgi_server_config = ap_get_module_config(s->module_config, &wsgi_module);
+
+    /* Initialise Python if not already done. */
 
     wsgi_python_init(NULL);
 }
@@ -3962,14 +3968,47 @@ module MODULE_VAR_EXPORT wsgi_module = {
 static int wsgi_hook_init(apr_pool_t *pconf, apr_pool_t *ptemp,
                             apr_pool_t *plog, server_rec *s)
 {
+    void *data = NULL;
+    const char *userdata_key = "wsgi_init";
     char package[128];
+
+#ifdef WIN32
+    /*
+     * No need to perform init in Win32 parent processes as
+     * the lack of fork on Win32 means we get no benefit as far
+     * as inheriting a preinitialized Python interpreter.
+     */
+
+    if (!getenv("AP_PARENT_PID"))
+        return OK;
+#endif
+
+    /*
+     * Init function gets called twice during startup, we only
+     * need to actually do anything on the second time it is
+     * called. This avoids unecessarily initialising and then
+     * destroying Python for no reason.
+     */
+
+    apr_pool_userdata_get(&data, userdata_key, s->process->pool);
+    if (!data) {
+        apr_pool_userdata_set((const void *)1, userdata_key,
+                              apr_pool_cleanup_null, s->process->pool);
+        return OK;
+    }
+
+    /* Setup module version information. */
 
     sprintf(package, "mod_wsgi/%d.%d-TRUNK", MOD_WSGI_MAJORVERSION_NUMBER,
             MOD_WSGI_MINORVERSION_NUMBER);
 
     ap_add_version_component(pconf, package);
 
+    /* Retain reference to main server config. */
+
     wsgi_server_config = ap_get_module_config(s->module_config, &wsgi_module);
+
+    /* Initialise Python if not already done. */
 
     wsgi_python_init(pconf);
 
