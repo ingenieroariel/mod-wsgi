@@ -17,15 +17,6 @@
  */
 
 #include "httpd.h"
-#include "http_config.h"
-#include "http_core.h"
-#include "http_log.h"
-#include "http_main.h"
-#include "http_protocol.h"
-#include "http_request.h"
-#include "util_script.h"
-#include "util_md5.h"
-#include "ap_config.h"
 
 #if !defined(AP_SERVER_MAJORVERSION_NUMBER)
 #if AP_MODULE_MAGIC_AT_LEAST(20010224,0)
@@ -62,12 +53,25 @@ typedef int apr_size_t;
 #define apr_pstrcat ap_pstrcat
 #define apr_pcalloc ap_pcalloc
 typedef time_t apr_time_t;
+#define CORE_PRIVATE 1
+#include "http_config.h"
+#undef CORE_PRIVATE
 #else
-#include "apr_tables.h"
-#include "apr_strings.h"
 #include "ap_mpm.h"
 #include "ap_compat.h"
+#include "apr_tables.h"
+#include "apr_strings.h"
+#include "http_config.h"
 #endif
+
+#include "ap_config.h"
+#include "http_core.h"
+#include "http_log.h"
+#include "http_main.h"
+#include "http_protocol.h"
+#include "http_request.h"
+#include "util_script.h"
+#include "util_md5.h"
 
 #if !AP_MODULE_MAGIC_AT_LEAST(20050127,0)
 /* Debian backported ap_regex_t to Apache 2.0 and
@@ -3231,7 +3235,12 @@ static const char *wsgi_script_alias_directive(cmd_parms *cmd, void *mconfig,
 static const char *wsgi_optimize_directive(cmd_parms *cmd, void *mconfig,
                                            const char *f)
 {
+    const char *error = NULL;
     WSGIServerConfig *config = NULL;
+
+    error = ap_check_cmd_context(cmd, GLOBAL_ONLY);
+    if (error != NULL)
+        return error;
 
     config = ap_get_module_config(cmd->server->module_config, &wsgi_module);
     config->optimize = !strcasecmp(f, "On");
@@ -3338,7 +3347,12 @@ static const char *wsgi_buffering_directive(cmd_parms *cmd, void *mconfig,
 static const char *wsgi_restrict_stdin(cmd_parms *cmd, void *mconfig,
                                        const char *f)
 {
+    const char *error = NULL;
     WSGIServerConfig *config = NULL;
+
+    error = ap_check_cmd_context(cmd, GLOBAL_ONLY);
+    if (error != NULL)
+        return error;
 
     config = ap_get_module_config(cmd->server->module_config, &wsgi_module);
     config->xstdin = !!strcasecmp(f, "Off");
@@ -3349,7 +3363,12 @@ static const char *wsgi_restrict_stdin(cmd_parms *cmd, void *mconfig,
 static const char *wsgi_restrict_stdout(cmd_parms *cmd, void *mconfig,
                                         const char *f)
 {
+    const char *error = NULL;
     WSGIServerConfig *config = NULL;
+
+    error = ap_check_cmd_context(cmd, GLOBAL_ONLY);
+    if (error != NULL)
+        return error;
 
     config = ap_get_module_config(cmd->server->module_config, &wsgi_module);
     config->xstdout = !!strcasecmp(f, "Off");
@@ -3360,7 +3379,12 @@ static const char *wsgi_restrict_stdout(cmd_parms *cmd, void *mconfig,
 static const char *wsgi_restrict_signal(cmd_parms *cmd, void *mconfig,
                                         const char *f)
 {
+    const char *error = NULL;
     WSGIServerConfig *config = NULL;
+
+    error = ap_check_cmd_context(cmd, GLOBAL_ONLY);
+    if (error != NULL)
+        return error;
 
     config = ap_get_module_config(cmd->server->module_config, &wsgi_module);
     config->xsignal = !!strcasecmp(f, "Off");
