@@ -1535,10 +1535,10 @@ static int Adapter_run(AdapterObject *self, PyObject *object)
         }
 
         if (PyObject_HasAttrString(self->sequence, "close")) {
-            close = PyObject_GetAttrString(self->sequence, "close");
-
             PyObject *args = NULL;
             PyObject *data = NULL;
+
+            close = PyObject_GetAttrString(self->sequence, "close");
 
             args = Py_BuildValue("()");
             data = PyEval_CallObject(close, args);
