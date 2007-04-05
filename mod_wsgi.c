@@ -2739,11 +2739,11 @@ static int wsgi_execute_script(request_rec *r, const char *interpreter,
         object = PyDict_GetItemString(module_dict, callable);
 
         if (object) {
-            Py_INCREF(object);
-
             AdapterObject *adapter = NULL;
             adapter = newAdapterObject(r, log, interpreter, callable,
                                        reloading, mechanism, buffering);
+
+            Py_INCREF(object);
 
             if (adapter)
                 status = Adapter_run(adapter, object);
