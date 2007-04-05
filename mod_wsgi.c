@@ -112,6 +112,7 @@ typedef struct {
     const char *interpreter;
     const char *callable;
     int optimize;
+    int authorize;
     int reloading;
     int mechanism;
     int buffering;
@@ -133,6 +134,7 @@ static WSGIServerConfig *newWSGIServerConfig(apr_pool_t *p)
     object->interpreter = NULL;
     object->callable = NULL;
     object->optimize = -1;
+    object->authorize = -1;
     object->reloading = -1;
     object->mechanism = -1;
     object->buffering = -1;
@@ -2170,7 +2172,7 @@ static PyTypeObject Interpreter_Type = {
  * process has run.
  */
 
-static int wsgi_python_initialised = 0;
+static int wsgi_python_initialized = 0;
 
 #if AP_SERVER_MAJORVERSION_NUMBER >= 2
 static apr_pool_t *wsgi_server_pool = NULL;
@@ -2229,7 +2231,7 @@ static apr_status_t wsgi_python_term(void *data)
     PyEval_ReleaseLock();
 #endif
 
-    wsgi_python_initialised = 0;
+    wsgi_python_initialized = 0;
 
     return APR_SUCCESS;
 }
@@ -2240,9 +2242,9 @@ static void wsgi_python_init(apr_pool_t *pconf)
     WSGIServerConfig *config = NULL;
 
 #if defined(DARWIN) && (AP_SERVER_MAJORVERSION_NUMBER < 2)
-    static int initialised = 0;
+    static int initialized = 0;
 #else
-    static int initialised = 1;
+    static int initialized = 1;
 #endif
 
     /*
@@ -2254,7 +2256,7 @@ static void wsgi_python_init(apr_pool_t *pconf)
 
     /* Perform initialisation if required. */
 
-    if (!Py_IsInitialized() || !initialised) {
+    if (!Py_IsInitialized() || !initialized) {
         char buffer[256];
         const char *token = NULL;
         const char *version = NULL;
@@ -2268,7 +2270,7 @@ static void wsgi_python_init(apr_pool_t *pconf)
 
         /* Initialise Python. */
 
-        initialised = 1;
+        initialized = 1;
 
         Py_Initialize();
 
@@ -2315,7 +2317,7 @@ static void wsgi_python_init(apr_pool_t *pconf)
         }
 #endif
 
-        wsgi_python_initialised = 1;
+        wsgi_python_initialized = 1;
     }
 }
 
@@ -2939,7 +2941,7 @@ static apr_status_t wsgi_python_child_cleanup(void *data)
     PyDict_SetItemString(wsgi_interpreters, "", interp);
     Py_DECREF(interp);
 
-    if (wsgi_python_initialised) {
+    if (wsgi_python_initialized) {
         if (wsgi_acquire_interpreter("")) {
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
             ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0,
@@ -2997,7 +2999,7 @@ static void wsgi_python_child_init(apr_pool_t *p)
      * place to avoid it being done multiple times.
      */
 
-    if (wsgi_python_initialised)
+    if (wsgi_python_initialized)
         PyOS_AfterFork();
 
     /* Finalise any Python objects required by child process. */
@@ -3096,6 +3098,11 @@ static void *wsgi_merge_server_config(apr_pool_t *p, void *base_conf,
     else
         config->callable = parent->callable;
 
+    if (child->authorize != -1)
+        config->authorize = child->authorize;
+    else
+        config->authorize = parent->authorize;
+
     if (child->optimize != -1)
         config->optimize = child->optimize;
     else
@@ -3164,6 +3171,11 @@ static void *wsgi_merge_dir_config(apr_pool_t *p, void *base_conf,
         config->callable = child->callable;
     else
         config->callable = parent->callable;
+
+    if (child->authorize != -1)
+        config->authorize = child->authorize;
+    else
+        config->authorize = parent->authorize;
 
     if (child->optimize != -1)
         config->optimize = child->optimize;
@@ -3244,6 +3256,24 @@ static const char *wsgi_optimize_directive(cmd_parms *cmd, void *mconfig,
 
     config = ap_get_module_config(cmd->server->module_config, &wsgi_module);
     config->optimize = !strcasecmp(f, "On");
+
+    return NULL;
+}
+
+static const char *wsgi_authorization_directive(cmd_parms *cmd, void *mconfig,
+                                                const char *f)
+{
+    if (cmd->path) {
+        WSGIServerConfig *dconfig = NULL;
+        dconfig = (WSGIServerConfig *)mconfig;
+        dconfig->authorize = !strcasecmp(f, "On");
+    }
+    else {
+        WSGIServerConfig *sconfig = NULL;
+        sconfig = ap_get_module_config(cmd->server->module_config,
+                                       &wsgi_module);
+        sconfig->authorize = !strcasecmp(f, "On");
+    }
 
     return NULL;
 }
@@ -3526,7 +3556,7 @@ static void wsgi_log_script_error(request_rec *r, const char *e, const char *n)
 #endif
 }
 
-static void wsgi_build_environment(request_rec *r)
+static void wsgi_build_environment(request_rec *r, int authorize)
 {
     const char *value = NULL;
     const char *script_name = NULL;
@@ -3538,20 +3568,27 @@ static void wsgi_build_environment(request_rec *r)
     ap_add_common_vars(r);
 
     /*
-     * Add in authorization headers which Apache leaves out of
-     * CGI environment due to security concerns. WSGI still
-     * needs to see these otherwise it cannot implement any of
-     * the standard authentication schemes such as Basic and
-     * Digest.
+     * If enabled, pass along authorisation headers which Apache
+     * leaves out of CGI environment. WSGI still needs to see
+     * these if it needs to implement any of the standard
+     * authentication schemes such as Basic and Digest. We do
+     * not pass these through by default though as it can result
+     * in passwords being leaked though to a WSGI application
+     * when it shouldn't. This would be a problem where there is
+     * some sort of site wide authorisation scheme in place
+     * which has got nothing to do with specific applications.
      */
 
-    value = apr_table_get(r->headers_in, "Authorization");
-    if (value)
-        apr_table_setn(r->subprocess_env, "HTTP_AUTHORIZATION", value);
+    if (authorize) {
+        value = apr_table_get(r->headers_in, "Authorization");
+        if (value)
+            apr_table_setn(r->subprocess_env, "HTTP_AUTHORIZATION", value);
 
-    value = apr_table_get(r->headers_in, "Proxy-Authorization");
-    if (value)
-        apr_table_setn(r->subprocess_env, "HTTP_PROXY_AUTHORIZATION", value);
+        value = apr_table_get(r->headers_in, "Proxy-Authorization");
+        if (value)
+            apr_table_setn(r->subprocess_env, "HTTP_PROXY_AUTHORIZATION",
+                           value);
+    }
 
     /* If PATH_INFO not set, set it to an empty string. */
 
@@ -3727,6 +3764,7 @@ static int wsgi_hook_handler(request_rec *r)
 
     const char *interpreter = NULL;
     const char *callable = NULL;
+    int authorize = -1;
     int reloading = -1;
     int mechanism = -1;
     int buffering = -1;
@@ -3814,18 +3852,20 @@ static int wsgi_hook_handler(request_rec *r)
     dconfig = ap_get_module_config(r->per_dir_config, &wsgi_module);
     sconfig = ap_get_module_config(r->server->module_config, &wsgi_module);
 
-    /* Build the sub process environment. */
-
-    wsgi_build_environment(r);
-
     /* Determine values of configuration settings. */
+
+    authorize = dconfig->authorize;
+
+    if (authorize < 0) {
+        authorize = sconfig->authorize;
+        if (authorize < 0)
+            authorize = 0;
+    }
 
     interpreter = dconfig->interpreter;
 
     if (!interpreter)
         interpreter = sconfig->interpreter;
-
-    interpreter = wsgi_interpreter_name(r, interpreter);
 
     callable = dconfig->callable;
 
@@ -3857,6 +3897,14 @@ static int wsgi_hook_handler(request_rec *r)
         if (buffering < 0)
             buffering = 0;
     }
+
+    /* Build the sub process environment. */
+
+    wsgi_build_environment(r, authorize);
+
+    /* Calculate target Python interpreter name. */
+
+    interpreter = wsgi_interpreter_name(r, interpreter);
 
     /* Execute the target WSGI application script. */
 
@@ -3910,6 +3958,8 @@ static const command_rec wsgi_commands[] =
         RSRC_CONF, TAKE2, "Map location to target WSGI script file." },
     { "WSGIPythonOptimize", wsgi_optimize_directive, NULL,
         RSRC_CONF, TAKE1, "Enable/Disable Python compiler optimisations." },
+    { "WSGIPassAuthorization", wsgi_authorization_directive, NULL,
+        RSRC_CONF, TAKE1, "Enable/Disable passing authorization headers." },
     { "WSGIApplicationGroup", wsgi_interpreter_directive, NULL,
         OR_FILEINFO, TAKE1, "Name of the WSGI application group to use." },
     { "WSGIScriptCallable", wsgi_callable_directive, NULL,
@@ -4048,6 +4098,8 @@ static const command_rec wsgi_commands[] =
         RSRC_CONF, "Map location pattern to target WSGI script file."),
     AP_INIT_TAKE1("WSGIPythonOptimize", wsgi_optimize_directive, NULL,
         RSRC_CONF, "Enable/Disable Python compiler optimisations."),
+    AP_INIT_TAKE1("WSGIPassAuthorization", wsgi_authorization_directive, NULL,
+        OR_FILEINFO, "Enable/Disable passing authorization headers."),
     AP_INIT_TAKE1("WSGIApplicationGroup", wsgi_interpreter_directive, NULL,
         OR_FILEINFO, "Name of the WSGI application group to use."),
     AP_INIT_TAKE1("WSGIScriptCallable", wsgi_callable_directive, NULL,
