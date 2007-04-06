@@ -1316,20 +1316,37 @@ static int Adapter_output(AdapterObject *self,
         }
 
         /*
-	 * If content length not set and dealing with iterable
-	 * response from application, see if response is a
-	 * sequence consisting of only one item and if so, the
-	 * current length of data being output is the content
-	 * length to use. Ignore any error from determining
-	 * length of sequence.
+	 * Enabled chunked transfer encoding for the content of
+	 * a response if forcibly enabled and client is using
+	 * HTTP/1.1 protocol or a later version.
          */
 
-        if (!set && self->sequence && PySequence_Check(self->sequence)) {
-            if (PySequence_Size(self->sequence) == 1)
-                ap_set_content_length(self->r, length);
+        if (self->r->proto_num >= 1001 && self->chunking == 1)
+            self->r->chunked = 1;
 
-            if (PyErr_Occurred())
-                PyErr_Clear();
+        /*
+	 * If content length not set and dealing with iterable
+	 * response from application, see if response is a
+	 * sequence consisting of only one item and if so use
+	 * the current length of data being output as the
+	 * content length to use. Otherwise, if content length
+	 * cannot be determined and automatic mode for use of
+	 * chunked transfer encoding is enabled, turn on chunked
+         * transfer encoding.
+         */
+
+        if (!set && self->sequence) {
+            if (PySequence_Check(self->sequence)) {
+                if (PySequence_Size(self->sequence) == 1)
+                    ap_set_content_length(self->r, length);
+                else if (self->r->proto_num >= 1001 && self->chunking == 2)
+                    self->r->chunked = 1;
+
+                if (PyErr_Occurred())
+                    PyErr_Clear();
+            }
+            else if (self->r->proto_num >= 1001 && self->chunking == 2)
+                self->r->chunked = 1;
         }
 
         ap_send_http_header(self->r);
@@ -3405,13 +3422,23 @@ static const char *wsgi_chunking_directive(cmd_parms *cmd, void *mconfig,
     if (cmd->path) {
         WSGIServerConfig *dconfig = NULL;
         dconfig = (WSGIServerConfig *)mconfig;
-        dconfig->chunking = !strcasecmp(f, "On");
+        if (!strcasecmp(f, "On"))
+            dconfig->chunking = 1;
+        else if (!strcasecmp(f, "Auto"))
+            dconfig->chunking = 2;
+        else
+            dconfig->chunking = 0;
     }
     else {
         WSGIServerConfig *sconfig = NULL;
         sconfig = ap_get_module_config(cmd->server->module_config,
                                        &wsgi_module);
-        sconfig->chunking = !strcasecmp(f, "On");
+        if (!strcasecmp(f, "On"))
+            sconfig->chunking = 1;
+        else if (!strcasecmp(f, "Auto"))
+            sconfig->chunking = 2;
+        else
+            sconfig->chunking = 0;
     }
 
     return NULL;
@@ -3956,18 +3983,6 @@ static int wsgi_hook_handler(request_rec *r)
 
     if (status != OK)
         return status;
-
-    /*
-     * Enabled chunked transfer encoding for the content of a
-     * response if enabled and client is using HTTP/1.1 protocol
-     * or a later version. This is done using a directive as
-     * WSGI specification has no way for an application to
-     * indicate itself that it wants chunked transfer encoding
-     * to be used.
-     */
-
-    if (r->proto_num >= 1001 && chunking)
-        r->chunked = 1;
 
     /* Build the sub process environment. */
 
