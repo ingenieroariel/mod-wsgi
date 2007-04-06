@@ -2935,7 +2935,11 @@ static apr_status_t wsgi_python_child_cleanup(void *data)
      * If mod_python is being loaded it is left to mod_python to
      * destroy mod_python, although it currently doesn't do that
      * and so exit functions will not be called for main
-     * interpreter in that case.
+     * interpreter in that case. Also note that if there are any
+     * exceptions generated from exit functions in the main
+     * intepreter, they will be logged through log object which
+     * is attached to sys.stderr presuming it hadn't been
+     * replaced by user code.
      */
 
     PyDict_SetItemString(wsgi_interpreters, "", interp);
