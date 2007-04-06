@@ -116,6 +116,7 @@ typedef struct {
     int reloading;
     int mechanism;
     int buffering;
+    int chunking;
     int xstdin;
     int xstdout;
     int xsignal;
@@ -138,6 +139,7 @@ static WSGIServerConfig *newWSGIServerConfig(apr_pool_t *p)
     object->reloading = -1;
     object->mechanism = -1;
     object->buffering = -1;
+    object->chunking = -1;
     object->xstdin = -1;
     object->xstdout = -1;
     object->xsignal = -1;
@@ -1152,6 +1154,7 @@ typedef struct {
         int reloading;
         int mechanism;
         int buffering;
+        int chunking;
         int status;
         PyObject *headers;
         PyObject *sequence;
@@ -1163,7 +1166,8 @@ static PyTypeObject Adapter_Type;
 static AdapterObject *newAdapterObject(request_rec *r, LogObject *log,
                                        const char *interpreter,
                                        const char *callable, int reloading,
-                                       int mechanism, int buffering)
+                                       int mechanism, int buffering,
+                                       int chunking)
 {
     AdapterObject *self;
 
@@ -1177,6 +1181,7 @@ static AdapterObject *newAdapterObject(request_rec *r, LogObject *log,
     self->reloading = reloading;
     self->mechanism = mechanism;
     self->buffering = buffering;
+    self->chunking = chunking;
     self->status = -1;
     self->headers = NULL;
     self->sequence = NULL;
@@ -1484,6 +1489,10 @@ static PyObject *Adapter_environ(AdapterObject *self)
 
     object = PyBool_FromLong(self->buffering);
     PyDict_SetItemString(environ, "mod_wsgi.output_buffering", object);
+    Py_DECREF(object);
+
+    object = PyBool_FromLong(self->chunking);
+    PyDict_SetItemString(environ, "mod_wsgi.output_chunking", object);
     Py_DECREF(object);
 
     return environ;
@@ -2565,7 +2574,8 @@ static char *wsgi_module_name(request_rec *r)
 
 static int wsgi_execute_script(request_rec *r, const char *interpreter,
                                      const char *callable, int reloading,
-                                     int mechanism, int buffering)
+                                     int mechanism, int buffering,
+                                     int chunking)
 {
     InterpreterObject *interp = NULL;
     PyObject *modules = NULL;
@@ -2741,7 +2751,8 @@ static int wsgi_execute_script(request_rec *r, const char *interpreter,
         if (object) {
             AdapterObject *adapter = NULL;
             adapter = newAdapterObject(r, log, interpreter, callable,
-                                       reloading, mechanism, buffering);
+                                       reloading, mechanism, buffering,
+                                       chunking);
 
             Py_INCREF(object);
 
@@ -3127,6 +3138,11 @@ static void *wsgi_merge_server_config(apr_pool_t *p, void *base_conf,
     else
         config->buffering = parent->buffering;
 
+    if (child->chunking != -1)
+        config->chunking = child->chunking;
+    else
+        config->chunking = parent->chunking;
+
     if (child->xstdin != -1)
         config->xstdin = child->xstdin;
     else
@@ -3200,6 +3216,11 @@ static void *wsgi_merge_dir_config(apr_pool_t *p, void *base_conf,
         config->buffering = child->buffering;
     else
         config->buffering = parent->buffering;
+
+    if (child->chunking != -1)
+        config->chunking = child->chunking;
+    else
+        config->chunking = parent->chunking;
 
     if (child->xstdin != -1)
         config->xstdin = child->xstdin;
@@ -3373,6 +3394,24 @@ static const char *wsgi_buffering_directive(cmd_parms *cmd, void *mconfig,
         sconfig = ap_get_module_config(cmd->server->module_config,
                                        &wsgi_module);
         sconfig->buffering = !strcasecmp(f, "On");
+    }
+
+    return NULL;
+}
+
+static const char *wsgi_chunking_directive(cmd_parms *cmd, void *mconfig,
+                                                const char *f)
+{
+    if (cmd->path) {
+        WSGIServerConfig *dconfig = NULL;
+        dconfig = (WSGIServerConfig *)mconfig;
+        dconfig->chunking = !strcasecmp(f, "On");
+    }
+    else {
+        WSGIServerConfig *sconfig = NULL;
+        sconfig = ap_get_module_config(cmd->server->module_config,
+                                       &wsgi_module);
+        sconfig->chunking = !strcasecmp(f, "On");
     }
 
     return NULL;
@@ -3772,6 +3811,7 @@ static int wsgi_hook_handler(request_rec *r)
     int reloading = -1;
     int mechanism = -1;
     int buffering = -1;
+    int chunking = -1;
 
     /*
      * Only process requests for this module. Honour a content
@@ -3844,13 +3884,6 @@ static int wsgi_hook_handler(request_rec *r)
     }
 #endif
 
-    /* Setup policy to apply if request contains a body. */
-
-    status = ap_setup_client_block(r, REQUEST_CHUNKED_ERROR);
-
-    if (status != OK)
-        return status;
-
     /* Get config relevant to this request. */
 
     dconfig = ap_get_module_config(r->per_dir_config, &wsgi_module);
@@ -3902,6 +3935,40 @@ static int wsgi_hook_handler(request_rec *r)
             buffering = 0;
     }
 
+    chunking = dconfig->chunking;
+
+    if (chunking < 0) {
+        chunking = sconfig->chunking;
+        if (chunking < 0)
+            chunking = 0;
+    }
+
+    /*
+     * Setup policy to apply if request contains a body. Note
+     * that it is not possible to have chunked transfer encoding
+     * for the request content. This is actually a limitation in
+     * WSGI specification as it has no way of indicating that
+     * there is content of unknown length, nor a way to deal
+     * with trailers appearing after any chunked content.
+     */
+
+    status = ap_setup_client_block(r, REQUEST_CHUNKED_ERROR);
+
+    if (status != OK)
+        return status;
+
+    /*
+     * Enabled chunked transfer encoding for the content of a
+     * response if enabled and client is using HTTP/1.1 protocol
+     * or a later version. This is done using a directive as
+     * WSGI specification has no way for an application to
+     * indicate itself that it wants chunked transfer encoding
+     * to be used.
+     */
+
+    if (r->proto_num >= 1001 && chunking)
+        r->chunked = 1;
+
     /* Build the sub process environment. */
 
     wsgi_build_environment(r, authorize);
@@ -3913,7 +3980,7 @@ static int wsgi_hook_handler(request_rec *r)
     /* Execute the target WSGI application script. */
 
     return wsgi_execute_script(r, interpreter, callable, reloading,
-                               mechanism, buffering);
+                               mechanism, buffering, chunking);
 }
 
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
@@ -3974,6 +4041,8 @@ static const command_rec wsgi_commands[] =
         OR_FILEINFO, TAKE1, "Defines what is reloaded when a reload occurs." },
     { "WSGIOutputBuffering", wsgi_buffering_directive, NULL,
         OR_FILEINFO, TAKE1, "Enable/Disable buffering of response." },
+    { "WSGIOutputChunking", wsgi_chunking_directive, NULL,
+        OR_FILEINFO, TAKE1, "Enable/Disable chunking of response." },
     { "WSGIRestrictStdin", wsgi_restrict_stdin, NULL,
         RSRC_CONF, TAKE1, "Enable/Disable restrictions on use of STDIN." },
     { "WSGIRestrictStdout", wsgi_restrict_stdout, NULL,
@@ -4114,6 +4183,8 @@ static const command_rec wsgi_commands[] =
         OR_FILEINFO, "Defines what is reloaded when a reload occurs."),
     AP_INIT_TAKE1("WSGIOutputBuffering", wsgi_buffering_directive, NULL,
         OR_FILEINFO, "Enable/Disable buffering of response."),
+    AP_INIT_TAKE1("WSGIOutputChunking", wsgi_chunking_directive, NULL,
+        OR_FILEINFO, "Enable/Disable chunking of response."),
     AP_INIT_TAKE1("WSGIRestrictStdin", wsgi_restrict_stdin, NULL,
         RSRC_CONF, "Enable/Disable restrictions on use of STDIN."),
     AP_INIT_TAKE1("WSGIRestrictStdout", wsgi_restrict_stdout, NULL,
