@@ -1316,15 +1316,6 @@ static int Adapter_output(AdapterObject *self,
         }
 
         /*
-	 * Enabled chunked transfer encoding for the content of
-	 * a response if forcibly enabled and client is using
-	 * HTTP/1.1 protocol or a later version.
-         */
-
-        if (self->r->proto_num >= 1001 && self->chunking == 1)
-            self->r->chunked = 1;
-
-        /*
 	 * If content length not set and dealing with iterable
 	 * response from application, see if response is a
 	 * sequence consisting of only one item and if so use
@@ -2015,6 +2006,7 @@ static void Interpreter_dealloc(InterpreterObject *self)
         if (func) {
             PyObject *args = NULL;
             PyObject *res = NULL;
+            Py_INCREF(func);
             res = PyEval_CallObject(func, (PyObject *)NULL);
             if (!res) {
                 PyErr_Clear();
@@ -2074,6 +2066,16 @@ static void Interpreter_dealloc(InterpreterObject *self)
 
             PyErr_Fetch(&type, &value, &traceback);
 
+            if (!value) {
+                value = Py_None;
+                Py_INCREF(value);
+            }
+
+            if (!traceback) {
+                traceback = Py_None;
+                Py_INCREF(traceback);
+            }
+
             m = PyImport_ImportModule("traceback");
 
             if (m) {
@@ -2084,6 +2086,7 @@ static void Interpreter_dealloc(InterpreterObject *self)
                 if (o) {
                     PyObject *log = NULL;
                     PyObject *args = NULL;
+                    Py_INCREF(o);
                     log = (PyObject *)newLogObject(NULL);
                     args = Py_BuildValue("(OOOOO)", type, value,
                                          traceback, Py_None, log);
@@ -2647,6 +2650,8 @@ static int wsgi_execute_script(request_rec *r, const char *interpreter,
     modules = PyImport_GetModuleDict();
     module = PyDict_GetItemString(modules, name);
 
+    Py_XINCREF(module);
+
     if (module)
         found = 1;
 
@@ -2667,6 +2672,13 @@ static int wsgi_execute_script(request_rec *r, const char *interpreter,
 
     if (module && reloading) {
         if (wsgi_reload_required(r, module)) {
+            /* Discard reference to loaded module. */
+
+            Py_DECREF(module);
+            module = NULL;
+
+            /* Check for interpreter or module reloading. */
+
             if (mechanism == 1 && *interpreter) {
                 /* Remove interpreter from set of interpreters. */
 
@@ -2720,21 +2732,13 @@ static int wsgi_execute_script(request_rec *r, const char *interpreter,
             }
             else
                 PyDict_DelItemString(modules, name);
-
-            module = NULL;
         }
     }
 
-    /*
-     * Load module if not already loaded otherwise ensure
-     * we have a reference to is so it isn't deleted while
-     * it is being used.
-     */
+    /* Load module if not already loaded. */
 
     if (!module)
         module = wsgi_load_source(name, r, interpreter, found);
-    else
-      Py_INCREF(module);
 
     /* Safe now to release the module lock. */
 
@@ -2849,6 +2853,16 @@ static int wsgi_execute_script(request_rec *r, const char *interpreter,
 
         PyErr_Fetch(&type, &value, &traceback);
 
+        if (!value) {
+            value = Py_None;
+            Py_INCREF(value);
+        }
+
+        if (!traceback) {
+            traceback = Py_None;
+            Py_INCREF(traceback);
+        }
+
         m = PyImport_ImportModule("traceback");
 
         if (m) {
@@ -2858,8 +2872,9 @@ static int wsgi_execute_script(request_rec *r, const char *interpreter,
             o = PyDict_GetItemString(d, "print_exception");
             if (o) {
                 PyObject *args = NULL;
-                args = Py_BuildValue("(OOOOO)", type, value,
-                                     traceback, Py_None, log);
+                Py_INCREF(o);
+                args = Py_BuildValue("(OOOOO)", type, value, traceback,
+                                     Py_None, log);
                 result = PyEval_CallObject(o, args);
                 Py_DECREF(args);
             }
@@ -3983,6 +3998,15 @@ static int wsgi_hook_handler(request_rec *r)
 
     if (status != OK)
         return status;
+
+    /*
+     * Enabled chunked transfer encoding for the content of
+     * a response if forcibly enabled and client is using
+     * HTTP/1.1 protocol or a later version.
+     */
+
+    if (r->proto_num >= 1001 && chunking == 1)
+        r->chunked = 1;
 
     /* Build the sub process environment. */
 
