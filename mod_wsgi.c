@@ -2930,9 +2930,8 @@ static apr_status_t wsgi_python_child_cleanup(void *data)
 #endif
 
     /*
-     * Extract a reference to the main Python interpreter from
+     * Extract a handle to the main Python interpreter from
      * interpreters dictionary as want to process that one last.
-     * Will need to add it back into the dictionary later on.
      */
 
     interp = PyDict_GetItemString(wsgi_interpreters, "");
@@ -2950,45 +2949,31 @@ static apr_status_t wsgi_python_child_cleanup(void *data)
     apr_thread_mutex_unlock(wsgi_interp_lock);
 #endif
 
+    /*
+     * Now we decrement reference on handle for main Python
+     * interpreter. This only causes exit functions to be called
+     * and doesn't result in interpreter being destroyed as we
+     * we didn't previously mark ourselves as the owner of the
+     * interpreter. Note that when Python as a whole is later
+     * being destroyed it will also call exit functions, but by
+     * then the exit function registrations have been removed
+     * and so they will not actually be run a second time.
+     */
+
+    Py_DECREF(interp);
+
 #if defined(WITH_THREAD)
     PyEval_ReleaseLock();
 #endif
 
     /*
      * Destroy Python itself including the main interpreter.
-     * This will trigger exit functions for the main interpreter
      * If mod_python is being loaded it is left to mod_python to
-     * destroy mod_python, although it currently doesn't do that
-     * and so exit functions will not be called for main
-     * interpreter in that case. Also note that if there are any
-     * exceptions generated from exit functions in the main
-     * intepreter, they will be logged through log object which
-     * is attached to sys.stderr presuming it hadn't been
-     * replaced by user code.
+     * destroy mod_python, although it currently doesn't do so.
      */
 
-    PyDict_SetItemString(wsgi_interpreters, "", interp);
-    Py_DECREF(interp);
-
-    if (wsgi_python_initialized) {
-        if (wsgi_acquire_interpreter("")) {
-#if AP_SERVER_MAJORVERSION_NUMBER < 2
-            ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0,
-                         "mod_wsgi (pid=%d): Cleanup interpreter ''.",
-                         getpid());
-#else
-            ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, 0,
-                         "mod_wsgi (pid=%d): Cleanup interpreter ''.",
-                         getpid());
-#endif
-
-            Py_Finalize();
-
-#if defined(WITH_THREAD)
-            PyEval_ReleaseLock();
-#endif
-        }
-    }
+    if (wsgi_python_initialized)
+        wsgi_python_term(0);
 
 #if AP_SERVER_MAJORVERSION_NUMBER >= 2
     return APR_SUCCESS;
