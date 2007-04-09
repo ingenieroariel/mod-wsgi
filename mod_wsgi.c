@@ -109,6 +109,7 @@ typedef struct {
 typedef struct {
     apr_pool_t *pool;
     apr_array_header_t *aliases;
+    apr_array_header_t *daemons;
     const char *interpreter;
     const char *callable;
     int optimize;
@@ -131,6 +132,7 @@ static WSGIServerConfig *newWSGIServerConfig(apr_pool_t *p)
 
     object->pool = p;
     object->aliases = NULL;
+    object->daemons = NULL;
     object->interpreter = NULL;
     object->callable = NULL;
     object->optimize = -1;
@@ -2225,6 +2227,10 @@ static apr_status_t wsgi_python_term(void *data)
     PyInterpreterState *interp = NULL;
     PyThreadState *tstate = NULL;
 
+    ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, 0,
+                 "mod_wsgi (pid=%d): Terminating Python.",
+                 getpid());
+
 #if defined(WITH_THREAD)
     PyEval_AcquireLock();
 #endif
@@ -2273,7 +2279,7 @@ static void wsgi_python_init(apr_pool_t *pconf)
         char buffer[256];
         const char *token = NULL;
         const char *version = NULL;
- 
+
         /* Check for optimisation flag. */
 
         if (wsgi_server_config->optimize > 0)
@@ -2282,6 +2288,9 @@ static void wsgi_python_init(apr_pool_t *pconf)
             Py_OptimizeFlag = 0;
 
         /* Initialise Python. */
+
+        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, 0,
+                     "mod_wsgi: Initializing Python.");
 
         initialized = 1;
 
@@ -2428,7 +2437,7 @@ static InterpreterObject *wsgi_acquire_interpreter(const char *name)
 static void wsgi_release_interpreter(InterpreterObject *handle)
 {
     PyThreadState *tstate = NULL;
- 
+
     /*
      * Need to release and destroy the thread state that
      * was created against the interpreter. This will
@@ -3117,11 +3126,6 @@ static void *wsgi_merge_server_config(apr_pool_t *p, void *base_conf,
     else
         config->authorize = parent->authorize;
 
-    if (child->optimize != -1)
-        config->optimize = child->optimize;
-    else
-        config->optimize = parent->optimize;
-
     if (child->reloading != -1)
         config->reloading = child->reloading;
     else
@@ -3190,11 +3194,6 @@ static void *wsgi_merge_dir_config(apr_pool_t *p, void *base_conf,
         config->authorize = child->authorize;
     else
         config->authorize = parent->authorize;
-
-    if (child->optimize != -1)
-        config->optimize = child->optimize;
-    else
-        config->optimize = parent->optimize;
 
     if (child->reloading != -1)
         config->reloading = child->reloading;
@@ -4036,6 +4035,386 @@ module MODULE_VAR_EXPORT wsgi_module = {
  * Apache 2.X module initialisation functions.
  */
 
+#if !defined(WIN32)
+
+#include "unixd.h"
+
+typedef struct {
+    const char *name;
+    const char *user;
+    uid_t uid;
+    const char *group;
+    gid_t gid;
+    apr_proc_t process;
+    pid_t pid;
+    const char *path;
+} WSGIDaemonEntry;
+
+static const char *wsgi_daemon_directive(cmd_parms *cmd, void *mconfig,
+                                         const char *args)
+{
+    const char *error = NULL;
+    WSGIServerConfig *config = NULL;
+
+    const char *name = NULL;
+    const char *user = NULL;
+    const char *group = NULL;
+
+    uid_t uid = unixd_config.user_id;
+    uid_t gid = unixd_config.group_id;
+
+    const char *option = NULL;
+    const char *value = NULL;
+
+    apr_array_header_t *daemons = NULL;
+
+    WSGIDaemonEntry *entries = NULL;
+    WSGIDaemonEntry *entry = NULL;
+
+    int i;
+
+    error = ap_check_cmd_context(cmd, GLOBAL_ONLY);
+    if (error != NULL)
+        return error;
+
+    name = ap_getword_conf(cmd->temp_pool, &args);
+
+    if (!name || !*name)
+        return "Name of WSGI daemon process not supplied.";
+
+    while (*args) {
+        option = ap_getword_conf(cmd->temp_pool, &args);
+
+        if (strstr(option, "user=") == option) {
+            value = option + 5;
+            if (!*value)
+                return "Invalid user for WSGI daemon process.";
+
+            user = value;
+            uid = ap_uname2id(user);
+            if (uid == 0)
+                return "WSGI process blocked from running as root.";
+
+            if (*user == '#') {
+                struct passwd *entry = NULL;
+
+                if ((entry = getpwuid(uid)) == NULL)
+                    return "Couldn't determine user name from uid.";
+
+                user = entry->pw_name;
+            }
+        }
+        else if (strstr(option, "group=") == option) {
+            value = option + 6;
+            if (!*value)
+                return "Invalid group for WSGI daemon process.";
+
+            group = value;
+            gid = ap_gname2id(group);
+        }
+        else
+            return "Invalid option to WSGI daemon process definition.";
+    }
+
+    config = ap_get_module_config(cmd->server->module_config, &wsgi_module);
+
+    if (!config->daemons) {
+        config->daemons = apr_array_make(config->pool, 20,
+                                         sizeof(WSGIDaemonEntry));
+    }
+
+    daemons = config->daemons;
+    entries = (WSGIDaemonEntry *)daemons->elts;
+
+    for (i = 0; i < daemons->nelts; ++i) {
+        entry = &entries[i];
+        
+        if (!strcmp(entry->name, name))
+            return "Name duplicates previous WSGI daemon definition.";
+    }
+
+    entry = (WSGIDaemonEntry *)apr_array_push(config->daemons);
+
+    entry->name = apr_pstrdup(config->pool, name);
+    entry->user = apr_pstrdup(config->pool, user);
+    entry->group = apr_pstrdup(config->pool, group);
+
+    entry->uid = uid;
+    entry->gid = gid;
+
+    return NULL;
+}
+
+static server_rec *wsgi_root_server = NULL;
+static apr_pool_t *wsgi_root_pool = NULL;
+
+static apr_pool_t *wsgi_daemon_pool = NULL;
+static int wsgi_daemon_shutdown = 0;
+
+static void wsgi_signal_handler(int sig)
+{
+    if (sig == SIGHUP)
+        wsgi_daemon_shutdown++;
+}
+
+static void wsgi_daemon_main()
+{
+    while (!wsgi_daemon_shutdown)
+        sleep(1);
+}
+
+#if APR_HAS_OTHER_CHILD
+static int wsgi_start_process(apr_pool_t *pconf, server_rec *s,
+                              WSGIDaemonEntry *daemon);
+
+static void wsgi_manage_process(int reason, void *data, apr_wait_t status)
+{
+    WSGIDaemonEntry *daemon = data;
+
+    switch (reason) {
+
+        /* Child daemon process has died. */
+
+        case APR_OC_REASON_DEATH: {
+            int mpm_state;
+            int stopping;
+
+            /* Stop watching the existing process. */
+
+            apr_proc_other_child_unregister(daemon);
+
+            /*
+	     * Determine if Apache is being shutdown or not and
+	     * if it is not being shutdown, restart the child
+	     * daemon process that has died. If MPM doesn't
+	     * support query assume that child daemon process
+	     * shouldn't be restarted.
+             */
+
+            stopping = 1;
+
+            if (ap_mpm_query(AP_MPMQ_MPM_STATE, &mpm_state) == APR_SUCCESS
+                && mpm_state != AP_MPMQ_STOPPING) {
+                stopping = 0;
+            }
+
+            if (!stopping) {
+                ap_log_error(APLOG_MARK, APLOG_ERR, 0, wsgi_root_server,
+                             "mod_wsgi: Child daemon process '%s' died, "
+                             "restarting.", daemon->name);
+                wsgi_start_process(wsgi_root_pool, wsgi_root_server, daemon);
+            }
+
+            break;
+        }
+
+        /* Apache is being restarted. */
+
+        case APR_OC_REASON_RESTART: {
+            /*
+	     * Any child daemon processed will be killed off
+	     * automatically so just need to stop watching the
+	     * existing process.
+             */
+
+            apr_proc_other_child_unregister(daemon);
+
+            break;
+        }
+
+        /* Child daemon process vanished. */
+
+        case APR_OC_REASON_LOST: {
+            /*
+	     * Stop watching the existing process and then
+	     * restart the child daemon process that has died.
+             */
+
+            apr_proc_other_child_unregister(daemon);
+
+            ap_log_error(APLOG_MARK, APLOG_ERR, 0, wsgi_root_server,
+                         "mod_wsgi: Child daemon process '%s' died, "
+                         "restarting.", daemon->name);
+            wsgi_start_process(wsgi_root_pool, wsgi_root_server, daemon);
+
+            break;
+        }
+
+        /* Call to unregister the process. */
+
+        case APR_OC_REASON_UNREGISTER: {
+            /* Send signal to kill child daemon process. */
+
+            kill(daemon->process.pid, SIGHUP);
+
+            /* XXX Need to remove UNIX socket here. XXX */
+
+            break;
+        }
+    }
+}
+#endif
+
+static void wsgi_setup_access(server_rec *s, WSGIDaemonEntry *daemon)
+{
+    /* Don't bother switch user/group if not root. */
+
+    if (geteuid())
+        return;
+
+    /* Setup the daemon process real and effective group. */
+
+    if (setgid(daemon->gid) == -1) {
+        ap_log_error(APLOG_MARK, APLOG_ALERT, errno, s,
+                     "mod_wsgi (pid=%d): Unable to set group id to gid=%d.",
+                     getpid(), daemon->gid);
+    }
+    else {
+        if (initgroups(daemon->name, daemon->gid) == -1) {
+            ap_log_error(APLOG_MARK, APLOG_ALERT, errno, s,
+                        "mod_wsgi (pid=%d): Unable to set groups for uname=%s "
+                        "and gid=%u.", getpid(), daemon->name,
+                        (unsigned)daemon->gid);
+        }
+    }
+
+    /* Setup the daemon process real and effective user. */
+
+    if (setuid(daemon->uid) == -1) {
+        ap_log_error(APLOG_MARK, APLOG_ALERT, errno, s,
+                     "mod_wsgi (pid=%d): Unable to change to uid=%ld.",
+                     getpid(), (long)daemon->uid);
+    }
+}
+
+static int wsgi_start_process(apr_pool_t *pconf, server_rec *s,
+                              WSGIDaemonEntry *daemon)
+{
+    if ((daemon->pid = fork()) < 0) {
+        ap_log_error(APLOG_MARK, APLOG_ERR, errno, s, "mod_wsgi: Couldn't "
+                     "spawn daemon process '%s'.", daemon->name);
+        return DECLINED;
+    }
+    else if (daemon->pid == 0) {
+        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, s,
+                     "mod_wsgi (pid=%d): Starting process '%s' with uid=%ld "
+                     "and gid=%u.", getpid(), daemon->name, (long)daemon->uid,
+                     (unsigned)daemon->gid);
+
+        /*
+         * Close child copy of the listening sockets for the
+         * Apache parent process so we don't interfere with
+         * the parent process.
+         */
+
+        ap_close_listeners();
+
+        /* Create a pool for the child daemon process. */
+
+        apr_pool_create(&wsgi_daemon_pool, pconf);
+
+        /*
+	 * Setup Python in the child daemon process. Note that
+	 * we ensure that we are marked as the original
+	 * initialiser of the Python interpreter even though
+	 * mod_python might have done it, as we will be the one
+	 * to cleanup the child daemon process and not
+	 * mod_python.
+         */
+
+        wsgi_python_initialized = 1;
+        wsgi_python_child_init(wsgi_daemon_pool);
+
+        /*
+	 * Register signal handler to receive shutdown signal
+	 * from Apache parent process.
+         */
+
+        wsgi_daemon_shutdown = 0;
+
+        apr_signal(SIGCHLD, SIG_IGN);
+        apr_signal(SIGHUP, wsgi_signal_handler);
+
+        /* Setup daemon process user/group access. */
+
+        wsgi_setup_access(s, daemon);
+
+        /* Run the main routine for the daemon process. */
+
+        wsgi_daemon_main();
+
+        /*
+         * Destroy the pool for the daemon process. This will
+         * have the side affect of also destroying Python.
+         */
+
+        ap_log_error(APLOG_MARK, APLOG_ERR, 0, wsgi_root_server,
+                     "mod_wsgi (pid=%d): Stopping process '%s'.",
+                     getpid(), daemon->name);
+
+        apr_pool_destroy(wsgi_daemon_pool);
+
+        /* Exit the process. */
+
+        exit(-1);
+    }
+
+    daemon->process.pid = daemon->pid;
+    daemon->process.err = daemon->process.in = daemon->process.out = NULL;
+    apr_pool_note_subprocess(pconf, &daemon->process, APR_KILL_AFTER_TIMEOUT);
+#if APR_HAS_OTHER_CHILD
+    apr_proc_other_child_register(&daemon->process, wsgi_manage_process,
+                                  daemon, NULL, pconf);
+#endif
+
+    return OK;
+}
+
+static int wsgi_start_daemons(apr_pool_t *pconf, server_rec *s)
+{
+    apr_array_header_t *daemons = NULL;
+
+    WSGIDaemonEntry *entries = NULL;
+    WSGIDaemonEntry *entry = NULL;
+
+    int i;
+
+    /* Do we need to create any daemon processes. */
+
+    daemons = wsgi_server_config->daemons;
+
+    if (!daemons)
+        return OK;
+
+    /*
+     * Cache references to root server and pool as will need
+     * to access these when restarting daemon process when
+     * they die.
+     */
+
+    wsgi_root_server = s;
+    wsgi_root_pool = pconf;
+
+    /* Startup in turn each of the named daemon process. */
+
+    entries = (WSGIDaemonEntry *)daemons->elts;
+
+    for (i = 0; i < daemons->nelts; ++i) {
+        int status;
+
+        entry = &entries[i];
+
+        status = wsgi_start_process(pconf, s, entry);
+
+        if (status != OK)
+            return status;
+    }
+
+    return OK;
+}
+
+#endif
+
 static int wsgi_hook_init(apr_pool_t *pconf, apr_pool_t *ptemp,
                             apr_pool_t *plog, server_rec *s)
 {
@@ -4043,13 +4422,15 @@ static int wsgi_hook_init(apr_pool_t *pconf, apr_pool_t *ptemp,
     const char *userdata_key = "wsgi_init";
     char package[128];
 
-#ifdef WIN32
+    int status = OK;
+
     /*
      * No need to perform init in Win32 parent processes as
      * the lack of fork on Win32 means we get no benefit as far
      * as inheriting a preinitialized Python interpreter.
      */
 
+#if defined(WIN32)
     if (!getenv("AP_PARENT_PID"))
         return OK;
 #endif
@@ -4083,7 +4464,13 @@ static int wsgi_hook_init(apr_pool_t *pconf, apr_pool_t *ptemp,
 
     wsgi_python_init(pconf);
 
-    return OK;
+    /* Startup separate named daemon processes. */
+
+#if !defined(WIN32)
+    status = wsgi_start_daemons(pconf, s);
+#endif
+
+    return status;
 }
 
 static void wsgi_hook_child_init(apr_pool_t *p, server_rec *s)
@@ -4137,6 +4524,10 @@ static const command_rec wsgi_commands[] =
         RSRC_CONF, "Enable/Disable restrictions on use of STDOUT."),
     AP_INIT_TAKE1("WSGIRestrictSignal", wsgi_restrict_signal, NULL,
         RSRC_CONF, "Enable/Disable restrictions on use of signal()."),
+#if !defined(WIN32)
+    AP_INIT_RAW_ARGS("WSGICreateDaemon", wsgi_daemon_directive, NULL,
+        RSRC_CONF, "Specify details of daemon process to start."),
+#endif
     { NULL }
 };
 
