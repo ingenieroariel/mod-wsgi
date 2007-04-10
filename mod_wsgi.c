@@ -4087,6 +4087,7 @@ static apr_pool_t *wsgi_parent_pool = NULL;
 static apr_pool_t *wsgi_daemon_pool = NULL;
 
 static int wsgi_daemon_count = 0;
+static apr_table_t *wsgi_daemon_sockets = NULL;
 
 static int wsgi_daemon_shutdown = 0;
 
@@ -4399,8 +4400,24 @@ static int wsgi_setup_socket(WSGIDaemonEntry *daemon)
     return sockfd;
 }
 
-static void wsgi_daemon_main(WSGIDaemonEntry *daemon)
+static void wsgi_daemon_main(WSGIDaemonEntry *daemon, int sockfd)
 {
+    /*
+     * When listener socket cannot be created or setup doen't
+     * work, dont want to just exit the process as that will
+     * create a fork bomb with the parent process continually
+     * trying to restart it. Instead just go into a continual
+     * sleep loop looking for a signal from parent process to
+     * shutdown the process.
+     */
+
+    if (sockfd == -1) {
+        while (!wsgi_daemon_shutdown)
+            sleep(1);
+
+        return;
+    }
+
     while (!wsgi_daemon_shutdown)
         sleep(1);
 }
@@ -4469,7 +4486,7 @@ static int wsgi_start_process(apr_pool_t *p, WSGIDaemonEntry *daemon)
 
         /* Run the main routine for the daemon process. */
 
-        wsgi_daemon_main(daemon);
+        wsgi_daemon_main(daemon, sockfd);
 
         /*
          * Destroy the pool for the daemon process. This will
@@ -4482,7 +4499,7 @@ static int wsgi_start_process(apr_pool_t *p, WSGIDaemonEntry *daemon)
 
         apr_pool_destroy(wsgi_daemon_pool);
 
-        /* Exit the process. */
+        /* Exit the daemon process when being shutdown. */
 
         exit(-1);
     }
@@ -4524,6 +4541,8 @@ static int wsgi_start_daemons(apr_pool_t *p)
 
     /* Startup in turn each of the named daemon process. */
 
+    wsgi_daemon_sockets = apr_table_make(p, wsgi_daemon_count);
+
     entries = (WSGIDaemonEntry *)daemons->elts;
 
     for (i = 0; i < daemons->nelts; ++i) {
@@ -4533,6 +4552,8 @@ static int wsgi_start_daemons(apr_pool_t *p)
 
         entry->socket = apr_psprintf(p, "%s.%d", wsgi_server_config->socket,
                                      entry->count);
+
+        apr_table_setn(wsgi_daemon_sockets, entry->name, entry->socket);
 
         status = wsgi_start_process(p, entry);
 
