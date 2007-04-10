@@ -2229,15 +2229,20 @@ static void wsgi_python_version()
     }
 }
 
-#if AP_SERVER_MAJORVERSION_NUMBER >= 2
 static apr_status_t wsgi_python_term(void *data)
 {
     PyInterpreterState *interp = NULL;
     PyThreadState *tstate = NULL;
 
+#if AP_SERVER_MAJORVERSION_NUMBER < 2
+    ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0,
+                 "mod_wsgi (pid=%d): Terminating Python.",
+                 getpid());
+#else
     ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, 0,
                  "mod_wsgi (pid=%d): Terminating Python.",
                  getpid());
+#endif
 
 #if defined(WITH_THREAD)
     PyEval_AcquireLock();
@@ -2262,7 +2267,6 @@ static apr_status_t wsgi_python_term(void *data)
 
     return APR_SUCCESS;
 }
-#endif
 
 static void wsgi_python_init(apr_pool_t *pconf)
 {
@@ -2297,8 +2301,13 @@ static void wsgi_python_init(apr_pool_t *pconf)
 
         /* Initialise Python. */
 
+#if AP_SERVER_MAJORVERSION_NUMBER < 2
+        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0,
+                     "mod_wsgi: Initializing Python.");
+#else
         ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, 0,
                      "mod_wsgi: Initializing Python.");
+#endif
 
         initialized = 1;
 
