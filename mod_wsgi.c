@@ -1990,6 +1990,9 @@ static void Interpreter_dealloc(InterpreterObject *self)
 
     module = PyImport_ImportModule("threading");
 
+    if (!module)
+        PyErr_Clear();
+
     if (module) {
         PyObject *dict = NULL;
         PyObject *func = NULL;
@@ -2008,11 +2011,123 @@ static void Interpreter_dealloc(InterpreterObject *self)
             Py_XDECREF(res);
             Py_DECREF(func);
         }
-
-        Py_DECREF(module);
     }
-    else
-        PyErr_Clear();
+
+    /*
+     * In Python 2.5.1 an exit function is no longer used to
+     * shutdown and wait on non daemon threads which were created
+     * from Python code. Instead, in Py_Main() it explicitly
+     * calls 'threading._shutdown()'. Thus need to emulate this
+     * behaviour for those versions.
+     */
+
+    if (module) {
+        PyObject *dict = NULL;
+        PyObject *func = NULL;
+        PyObject *handle = NULL;
+
+        dict = PyModule_GetDict(module);
+        func = PyDict_GetItemString(dict, "_shutdown");
+        if (func) {
+            PyObject *args = NULL;
+            PyObject *res = NULL;
+            Py_INCREF(func);
+            res = PyEval_CallObject(func, (PyObject *)NULL);
+
+            if (res == NULL) {
+                PyObject *m = NULL;
+                PyObject *result = NULL;
+
+                PyObject *type = NULL;
+                PyObject *value = NULL;
+                PyObject *traceback = NULL;
+
+#if AP_SERVER_MAJORVERSION_NUMBER < 2
+                ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE,
+                             0, "mod_wsgi (pid=%d): Exception occurred "
+                             "within threading._shutdown().",
+                             getpid());
+#else
+                ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE,
+                             0, 0, "mod_wsgi (pid=%d): Exception occurred "
+                             "within threading._shutdown().",
+                             getpid());
+#endif
+
+                PyErr_Fetch(&type, &value, &traceback);
+
+                if (!value) {
+                    value = Py_None;
+                    Py_INCREF(value);
+                }
+
+                if (!traceback) {
+                    traceback = Py_None;
+                    Py_INCREF(traceback);
+                }
+
+                m = PyImport_ImportModule("traceback");
+
+                if (m) {
+                    PyObject *d = NULL;
+                    PyObject *o = NULL;
+                    d = PyModule_GetDict(m);
+                    o = PyDict_GetItemString(d, "print_exception");
+                    if (o) {
+                        PyObject *log = NULL;
+                        PyObject *args = NULL;
+                        Py_INCREF(o);
+                        log = (PyObject *)newLogObject(NULL);
+                        args = Py_BuildValue("(OOOOO)", type, value,
+                                             traceback, Py_None, log);
+                        result = PyEval_CallObject(o, args);
+                        Py_DECREF(args);
+                        Py_DECREF(log);
+                    }
+                    Py_DECREF(o);
+                }
+
+                if (!result) {
+                    /*
+                     * If can't output exception and traceback then
+                     * use PyErr_Print to dump out details of the
+                     * exception. For SystemExit though if we do
+                     * that the process will actually be terminated
+                     * so can only clear the exception information
+                     * and keep going.
+                     */
+
+                    PyErr_Restore(type, value, traceback);
+
+                    if (!PyErr_ExceptionMatches(PyExc_SystemExit)) {
+                        PyErr_Print();
+                        if (Py_FlushLine())
+                            PyErr_Clear();
+                    }
+                    else {
+                        PyErr_Clear();
+                    }
+                }
+                else {
+                    Py_XDECREF(type);
+                    Py_XDECREF(value);
+                    Py_XDECREF(traceback);
+                }
+
+                Py_XDECREF(result);
+
+                Py_DECREF(m);
+            }
+
+            Py_XDECREF(res);
+            Py_DECREF(func);
+        }
+    }
+
+    /* Finally done with 'threading' module. */
+
+    if (module)
+        Py_DECREF(module);
 
     /* Invoke exit functions by calling sys.exitfunc(). */
 
@@ -2023,6 +2138,7 @@ static void Interpreter_dealloc(InterpreterObject *self)
         Py_INCREF(exitfunc);
         PySys_SetObject("exitfunc", (PyObject *)NULL);
         res = PyEval_CallObject(exitfunc, (PyObject *)NULL);
+
         if (res == NULL) {
             PyObject *m = NULL;
             PyObject *result = NULL;
@@ -2122,6 +2238,7 @@ static void Interpreter_dealloc(InterpreterObject *self)
 
             Py_DECREF(m);
         }
+
         Py_XDECREF(res);
         Py_DECREF(exitfunc);
     }
