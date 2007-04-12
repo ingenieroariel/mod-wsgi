@@ -1313,7 +1313,7 @@ static PyObject *Adapter_environ(AdapterObject *self)
 
     scheme = apr_table_get(r->subprocess_env, "HTTPS");
 
-    if (scheme && (!strcmp(scheme, "on") || !strcmp(scheme, "1"))) {
+    if (scheme && (!strcasecmp(scheme, "On") || !strcmp(scheme, "1"))) {
         object = PyString_FromString("https");
         PyDict_SetItemString(environ, "wsgi.url_scheme", object);
         Py_DECREF(object);
