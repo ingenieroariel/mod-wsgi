@@ -677,7 +677,7 @@ static PyObject *Input_readline(InputObject *self, PyObject *args)
         }
 
         /*
-	 * Read in remaining data required to achieve size. Note
+         * Read in remaining data required to achieve size. Note
          * that can't just return whatever the first read might
          * have returned if no EOL encountered as must return
          * exactly the required size if no EOL unless that would
@@ -745,10 +745,10 @@ static PyObject *Input_readline(InputObject *self, PyObject *args)
     }
     else {
         /*
-	 * Here we have to read in a line but where we have no
-	 * idea how long it may be. What we can do first is if
-	 * we have any residual data from a previous read
-	 * operation, see if it contains an EOL. This means we
+         * Here we have to read in a line but where we have no
+         * idea how long it may be. What we can do first is if
+         * we have any residual data from a previous read
+         * operation, see if it contains an EOL. This means we
          * have to do a search, but this is likely going to be
          * better than having to resize and copy memory later on.
          */
@@ -765,13 +765,13 @@ static PyObject *Input_readline(InputObject *self, PyObject *args)
         }
 
         /*
-	 * If residual data buffer didn't contain an EOL, all we
-	 * can do is allocate a reasonably sized string and if
-	 * that isn't big enough keep increasing it in size. For
-	 * this we will start out with a buffer 25% greater in
-	 * size than what is stored in the residual data buffer
-	 * or one the same size as Apache string size, whichever
-	 * is greater.
+         * If residual data buffer didn't contain an EOL, all we
+         * can do is allocate a reasonably sized string and if
+         * that isn't big enough keep increasing it in size. For
+         * this we will start out with a buffer 25% greater in
+         * size than what is stored in the residual data buffer
+         * or one the same size as Apache string size, whichever
+         * is greater.
          */
 
         if (self->buffer && size < 0) {
@@ -817,7 +817,7 @@ static PyObject *Input_readline(InputObject *self, PyObject *args)
         }
 
         /*
-	 * Read in remaining data until find an EOL, or until all
+         * Read in remaining data until find an EOL, or until all
          * data has been consumed.
          */
 
@@ -1203,11 +1203,11 @@ static int Adapter_output(AdapterObject *self,
         }
 
         /*
-	 * If content length not set and dealing with iterable
-	 * response from application, see if response is a
-	 * sequence consisting of only one item and if so use
-	 * the current length of data being output as the
-	 * content length to use.
+         * If content length not set and dealing with iterable
+         * response from application, see if response is a
+         * sequence consisting of only one item and if so use
+         * the current length of data being output as the
+         * content length to use.
          */
 
         if (!set && self->sequence) {
@@ -1691,8 +1691,8 @@ static InterpreterObject *newInterpreterObject(const char *name,
 
     if (interp) {
         /*
-	 * Interpreter provided to us so will not be
-	 * responsible for deleting it later.
+         * Interpreter provided to us so will not be
+         * responsible for deleting it later.
          */
 
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
@@ -1719,10 +1719,10 @@ static InterpreterObject *newInterpreterObject(const char *name,
     }
     else {
         /*
-	 * Create the interpreter. If creation of the
-	 * interpreter fails it will restore the
-	 * existing active thread state for us so don't
-	 * need to worry about it in that case.
+         * Create the interpreter. If creation of the
+         * interpreter fails it will restore the
+         * existing active thread state for us so don't
+         * need to worry about it in that case.
          */
 
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
@@ -2686,13 +2686,13 @@ static int wsgi_execute_script(request_rec *r, const char *interpreter,
                 PyDict_DelItemString(wsgi_interpreters, interpreter);
 
                 /*
-		 * Release the interpreter. If nothing else is
-		 * making use of it, this will cause it to be
-		 * destroyed immediately. If something was using
-		 * it then it will hang around till the other
-		 * handler has finished using it. This will
-		 * leave us without even the Python GIL being
-		 * locked.
+                 * Release the interpreter. If nothing else is
+                 * making use of it, this will cause it to be
+                 * destroyed immediately. If something was using
+                 * it then it will hang around till the other
+                 * handler has finished using it. This will
+                 * leave us without even the Python GIL being
+                 * locked.
                  */
 
                 wsgi_release_interpreter(interp);
@@ -3014,7 +3014,7 @@ static void wsgi_python_child_init(apr_pool_t *p)
 
     /*
      * Get a reference to the main Python interpreter created
-     * and associate our own thread state against it. 
+     * and associate our own thread state against it.
      */
 
     interp = PyInterpreterState_Head();
@@ -3509,7 +3509,7 @@ static int wsgi_hook_intercept(request_rec *r)
         return DECLINED;
 
     if (r->uri[0] != '/' && r->uri[0])
-        return DECLINED;           
+        return DECLINED;
 
     aliases = config->aliases;
     entries = (WSGIAliasEntry *)aliases->elts;
@@ -3772,7 +3772,7 @@ static const char *wsgi_callable_name(request_rec *r, const char *callable)
 static int wsgi_is_script_aliased(request_rec *r)
 {
     const char *t = NULL;
-   
+
     t = apr_table_get(r->notes, "alias-forced-type");
     return t && (!strcasecmp(t, "wsgi-script"));
 }
@@ -4164,7 +4164,7 @@ static const char *wsgi_daemon_directive(cmd_parms *cmd, void *mconfig,
 
     for (i = 0; i < daemons->nelts; ++i) {
         entry = &entries[i];
-        
+
         if (!strcmp(entry->name, name))
             return "Name duplicates previous WSGI daemon definition.";
     }
@@ -4234,11 +4234,11 @@ static void wsgi_manage_process(int reason, void *data, apr_wait_t status)
             apr_proc_other_child_unregister(daemon);
 
             /*
-	     * Determine if Apache is being shutdown or not and
-	     * if it is not being shutdown, restart the child
-	     * daemon process that has died. If MPM doesn't
-	     * support query assume that child daemon process
-	     * shouldn't be restarted.
+             * Determine if Apache is being shutdown or not and
+             * if it is not being shutdown, restart the child
+             * daemon process that has died. If MPM doesn't
+             * support query assume that child daemon process
+             * shouldn't be restarted.
              */
 
             stopping = 1;
@@ -4262,9 +4262,9 @@ static void wsgi_manage_process(int reason, void *data, apr_wait_t status)
 
         case APR_OC_REASON_RESTART: {
             /*
-	     * Any child daemon processed will be killed off
-	     * automatically so just need to stop watching the
-	     * existing process.
+             * Any child daemon processed will be killed off
+             * automatically so just need to stop watching the
+             * existing process.
              */
 
             apr_proc_other_child_unregister(daemon);
@@ -4276,8 +4276,8 @@ static void wsgi_manage_process(int reason, void *data, apr_wait_t status)
 
         case APR_OC_REASON_LOST: {
             /*
-	     * Stop watching the existing process and then
-	     * restart the child daemon process that has died.
+             * Stop watching the existing process and then
+             * restart the child daemon process that has died.
              */
 
             apr_proc_other_child_unregister(daemon);
@@ -4383,13 +4383,13 @@ static int wsgi_setup_socket(WSGIDaemonEntry *daemon)
         return -1;
     }
 
-    if (!geteuid()) {        
+    if (!geteuid()) {
         if (chown(daemon->socket, daemon->uid, -1) < 0) {
             ap_log_error(APLOG_MARK, APLOG_ERR, errno, daemon->server,
                          "mod_wsgi (pid=%d): Couldn't change owner of unix "
                          "domain socket '%s'.", getpid(), daemon->socket);
             return errno;
-        }   
+        }
     }
 
     return sockfd;
@@ -4449,12 +4449,12 @@ static int wsgi_start_process(apr_pool_t *p, WSGIDaemonEntry *daemon)
         apr_pool_create(&wsgi_daemon_pool, p);
 
         /*
-	 * Setup Python in the child daemon process. Note that
-	 * we ensure that we are marked as the original
-	 * initialiser of the Python interpreter even though
-	 * mod_python might have done it, as we will be the one
-	 * to cleanup the child daemon process and not
-	 * mod_python. We also need to perform the special
+         * Setup Python in the child daemon process. Note that
+         * we ensure that we are marked as the original
+         * initialiser of the Python interpreter even though
+         * mod_python might have done it, as we will be the one
+         * to cleanup the child daemon process and not
+         * mod_python. We also need to perform the special
          * Python setup which has to be done after a fork.
          */
 
@@ -4462,8 +4462,8 @@ static int wsgi_start_process(apr_pool_t *p, WSGIDaemonEntry *daemon)
         wsgi_python_child_init(wsgi_daemon_pool);
 
         /*
-	 * Register signal handler to receive shutdown signal
-	 * from Apache parent process.
+         * Register signal handler to receive shutdown signal
+         * from Apache parent process.
          */
 
         wsgi_daemon_shutdown = 0;
