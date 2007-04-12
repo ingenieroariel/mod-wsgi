@@ -524,138 +524,56 @@ static PyObject *Input_read(InputObject *self, PyObject *args)
         return PyString_FromString("");
 
     /*
-     * First deal with case where size has been specified. After
-     * that deal with case where expected that all remaining
-     * data is to be read in and returned as one string.
+     * If size is not specified for the number of bytes
+     * to read in, default to reading in standard Apache
+     * block size.
      */
 
-    if (size > 0) {
-        /* Allocate string of the exact size required. */
+    if (size < 0)
+        size = HUGE_STRING_LEN;
 
-        result = PyString_FromStringAndSize(NULL, size);
+    /* Allocate string of the exact size required. */
 
-        if (!result)
-            return NULL;
+    result = PyString_FromStringAndSize(NULL, size);
 
-        buffer = PyString_AS_STRING((PyStringObject *)result);
+    if (!result)
+        return NULL;
 
-        /* Copy any residual data from use of readline(). */
+    buffer = PyString_AS_STRING((PyStringObject *)result);
 
-        if (self->buffer && self->length) {
-            if (size >= self->length) {
-                length = self->length;
-                memcpy(buffer, self->buffer + self->offset, length);
-                self->offset = 0;
-                self->length = 0;
-            }
-            else {
-                length = size;
-                memcpy(buffer, self->buffer + self->offset, length);
-                self->offset += length;
-                self->length -= length;
-            }
-        }
+    /* Copy any residual data from use of readline(). */
 
-        /* If all data residual buffer consumed then free it. */
-
-        if (!self->length) {
-            free(self->buffer);
-            self->buffer = NULL;
-        }
-
-        /*
-         * Read in remaining data required to achieve size. If
-         * requested size of data wasn't able to be read in just
-         * return what was able to be read. Robust applications
-         * should keep reading until no data returned, not until
-         * the size of the data isn't what was requested.
-         */
-
-        if (length < size) {
-            Py_BEGIN_ALLOW_THREADS
-            n = ap_get_client_block(self->r, buffer + length, size - length);
-            Py_END_ALLOW_THREADS
-
-            if (n == -1) {
-                PyErr_SetString(PyExc_IOError, "request data read error");
-                Py_DECREF(result);
-                return NULL;
-            }
-            else if (n == 0) {
-                /* Have exhausted all the available input data. */
-
-                self->done = 1;
-            }
-
-            length += n;
-
-            /*
-             * Resize the final string. If the size reduction is
-             * by more than 25% of the string size, then Python
-             * will allocate a new block of memory and copy the
-             * data into it.
-             */
-
-            if (length != size) {
-                if (_PyString_Resize(&result, length))
-                    return NULL;
-            }
-        }
-    }
-    else {
-        /*
-         * Here we are going to try and read in all the
-         * remaining data. First we have to allocate a suitably
-         * large string, but we can't fully trust the amount
-         * that the request structure says is remaining based on
-         * the original content length though, as an input
-         * filter can insert/remove data from the input stream
-         * thereby invalidating the original content length.
-         * What we do is allow for an extra 25% above what we
-         * have already buffered and what the request structure
-         * says is remaining. A value of 25% has been chosen so
-         * as to match best how Python handles resizing of
-         * strings.
-         */
-
-        size = self->length;
-
-        if (self->r->remaining > 0)
-            size += self->r->remaining;
-
-        size = size + (size >> 2);
-
-        if (size < 256)
-            size = 256;
-
-        /* Allocate string of the estimated size. */
-
-        result = PyString_FromStringAndSize(NULL, size);
-
-        if (!result)
-            return NULL;
-
-        buffer = PyString_AS_STRING((PyStringObject *)result);
-
-        /*
-         * Copy any residual data from use of readline(). The
-         * residual should always be less in size than the
-         * string we have allocated to hold it, so can consume
-         * all of it.
-         */
-
-        if (self->buffer && self->length) {
+    if (self->buffer && self->length) {
+        if (size >= self->length) {
             length = self->length;
             memcpy(buffer, self->buffer + self->offset, length);
             self->offset = 0;
             self->length = 0;
-
-            free(self->buffer);
-            self->buffer = NULL;
         }
+        else {
+            length = size;
+            memcpy(buffer, self->buffer + self->offset, length);
+            self->offset += length;
+            self->length -= length;
+        }
+    }
 
-        /* Now make first attempt at reading remaining data. */
+    /* If all data residual buffer consumed then free it. */
 
+    if (!self->length) {
+        free(self->buffer);
+        self->buffer = NULL;
+    }
+
+    /*
+     * Read in remaining data required to achieve size. If
+     * requested size of data wasn't able to be read in just
+     * return what was able to be read. Robust applications
+     * should keep reading until no data returned, not until
+     * the size of the data isn't what was requested.
+     */
+
+    if (length < size) {
         Py_BEGIN_ALLOW_THREADS
         n = ap_get_client_block(self->r, buffer + length, size - length);
         Py_END_ALLOW_THREADS
@@ -674,46 +592,10 @@ static PyObject *Input_read(InputObject *self, PyObject *args)
         length += n;
 
         /*
-         * Don't just assume that all data has been read if
-         * amount read was less than that requested. Still must
-         * perform a read which returns that no more data found.
-         */
-
-        while (!self->done) {
-            /* Increase the size of the string by 25%. */
-
-            size = size + (size >> 2);
-
-            if (_PyString_Resize(&result, size))
-                return NULL;
-
-            buffer = PyString_AS_STRING((PyStringObject *)result);
-
-            /* Now make succesive attempt at reading data. */
-
-            Py_BEGIN_ALLOW_THREADS
-            n = ap_get_client_block(self->r, buffer + length, size - length);
-            Py_END_ALLOW_THREADS
-
-            if (n == -1) {
-                PyErr_SetString(PyExc_IOError, "request data read error");
-                Py_DECREF(result);
-                return NULL;
-            }
-            else if (n == 0) {
-                /* Have exhausted all the available input data. */
-
-                self->done = 1;
-            }
-
-            length += n;
-        }
-
-        /*
-         * Resize the final string. If the size reduction is by
-         * more than 25% of the string size, then Python will
-         * allocate a new block of memory and copy the data into
-         * it.
+         * Resize the final string. If the size reduction is
+         * by more than 25% of the string size, then Python
+         * will allocate a new block of memory and copy the
+         * data into it.
          */
 
         if (length != size) {
