@@ -98,7 +98,7 @@ module MODULE_VAR_EXPORT wsgi_module;
 module AP_MODULE_DECLARE_DATA wsgi_module;
 #endif
 
-/* Apache WSGI configuration. */
+/* Configuration objects. */
 
 typedef struct {
     const char *location;
@@ -108,19 +108,25 @@ typedef struct {
 
 typedef struct {
     apr_pool_t *pool;
-    apr_array_header_t *aliases;
-    apr_array_header_t *daemons;
-    const char *socket;
-    const char *interpreter;
-    const char *callable;
-    int optimize;
-    int authorize;
-    int reloading;
-    int mechanism;
-    int buffering;
-    int xstdin;
-    int xstdout;
-    int xsignal;
+
+    apr_array_header_t *alias_list;
+
+    apr_array_header_t *daemon_list;
+    const char *socket_prefix;
+
+    int python_optimize;
+    int restrict_stdin;
+    int restrict_stdout;
+    int restrict_signal;
+
+    const char *process_name;
+    const char *application_group;
+    const char *callable_object;
+
+    int pass_authorization;
+    int script_reloading;
+    int reload_mechanism;
+    int output_buffering;
 } WSGIServerConfig;
 
 static WSGIServerConfig *wsgi_server_config = NULL;
@@ -132,27 +138,452 @@ static WSGIServerConfig *newWSGIServerConfig(apr_pool_t *p)
     object = (WSGIServerConfig *)apr_pcalloc(p, sizeof(WSGIServerConfig));
 
     object->pool = p;
-    object->aliases = NULL;
-    object->daemons = NULL;
-    object->socket = NULL;
-    object->interpreter = NULL;
-    object->callable = NULL;
-    object->optimize = -1;
-    object->authorize = -1;
-    object->reloading = -1;
-    object->mechanism = -1;
-    object->buffering = -1;
-    object->xstdin = -1;
-    object->xstdout = -1;
-    object->xsignal = -1;
+
+    object->alias_list = NULL;
+
+    object->daemon_list = NULL;
+    object->socket_prefix = NULL;
 
 #if AP_SERVER_MAJORVERSION_NUMBER >= 2
-    object->socket = DEFAULT_REL_RUNTIMEDIR "/wsgisock";
-    object->socket = ap_append_pid(p, object->socket, ".");
-    object->socket = ap_server_root_relative(p, object->socket);
+    object->socket_prefix = DEFAULT_REL_RUNTIMEDIR "/wsgisock";
+    object->socket_prefix = ap_append_pid(p, object->socket_prefix, ".");
+    object->socket_prefix = ap_server_root_relative(p, object->socket_prefix);
 #endif
 
+    object->python_optimize = -1;
+    object->restrict_stdin = -1;
+    object->restrict_stdout = -1;
+    object->restrict_signal = -1;
+
+    object->process_name = NULL;
+    object->application_group = NULL;
+    object->callable_object = NULL;
+
+    object->pass_authorization = -1;
+    object->script_reloading = -1;
+    object->reload_mechanism = -1;
+    object->output_buffering = -1;
+
     return object;
+}
+
+static void *wsgi_create_server_config(apr_pool_t *p, server_rec *s)
+{
+    WSGIServerConfig *config = NULL;
+
+    config = newWSGIServerConfig(p);
+
+    return config;
+}
+
+static void *wsgi_merge_server_config(apr_pool_t *p, void *base_conf,
+                                      void *new_conf)
+{
+    WSGIServerConfig *config = NULL;
+    WSGIServerConfig *parent = NULL;
+    WSGIServerConfig *child = NULL;
+
+    config = newWSGIServerConfig(p);
+
+    parent = (WSGIServerConfig *)base_conf;
+    child = (WSGIServerConfig *)new_conf;
+
+    if (child->alias_list && parent->alias_list) {
+        config->alias_list = apr_array_append(p, child->alias_list,
+                                              parent->alias_list);
+    }
+    else if (child->alias_list) {
+        config->alias_list = apr_array_make(p, 20, sizeof(WSGIAliasEntry));
+        apr_array_cat(config->alias_list, child->alias_list);
+    }
+    else if (parent->alias_list) {
+        config->alias_list = apr_array_make(p, 20, sizeof(WSGIAliasEntry));
+        apr_array_cat(config->alias_list, parent->alias_list);
+    }
+
+    if (child->process_name)
+        config->process_name = child->process_name;
+    else
+        config->process_name = parent->process_name;
+
+    if (child->application_group)
+        config->application_group = child->application_group;
+    else
+        config->application_group = parent->application_group;
+
+    if (child->callable_object)
+        config->callable_object = child->callable_object;
+    else
+        config->callable_object = parent->callable_object;
+
+    if (child->pass_authorization != -1)
+        config->pass_authorization = child->pass_authorization;
+    else
+        config->pass_authorization = parent->pass_authorization;
+
+    if (child->script_reloading != -1)
+        config->script_reloading = child->script_reloading;
+    else
+        config->script_reloading = parent->script_reloading;
+
+    if (child->reload_mechanism != -1)
+        config->reload_mechanism = child->reload_mechanism;
+    else
+        config->reload_mechanism = parent->reload_mechanism;
+
+    if (child->output_buffering != -1)
+        config->output_buffering = child->output_buffering;
+    else
+        config->output_buffering = parent->output_buffering;
+
+    return config;
+}
+
+typedef struct {
+    apr_pool_t *pool;
+
+    const char *process_name;
+    const char *application_group;
+    const char *callable_object;
+
+    int pass_authorization;
+    int script_reloading;
+    int reload_mechanism;
+    int output_buffering;
+} WSGIDirectoryConfig;
+
+static WSGIDirectoryConfig *newWSGIDirectoryConfig(apr_pool_t *p)
+{
+    WSGIDirectoryConfig *object = NULL;
+
+    object = (WSGIDirectoryConfig *)apr_pcalloc(p, sizeof(WSGIDirectoryConfig));
+
+    object->pool = p;
+
+    object->process_name = NULL;
+    object->application_group = NULL;
+    object->callable_object = NULL;
+
+    object->pass_authorization = -1;
+    object->script_reloading = -1;
+    object->reload_mechanism = -1;
+    object->output_buffering = -1;
+
+    return object;
+}
+
+static void *wsgi_create_dir_config(apr_pool_t *p, char *dir)
+{
+    WSGIDirectoryConfig *config = NULL;
+
+    config = newWSGIDirectoryConfig(p);
+
+    return config;
+}
+
+static void *wsgi_merge_dir_config(apr_pool_t *p, void *base_conf,
+                                   void *new_conf)
+{
+    WSGIDirectoryConfig *config = NULL;
+    WSGIDirectoryConfig *parent = NULL;
+    WSGIDirectoryConfig *child = NULL;
+
+    config = newWSGIDirectoryConfig(p);
+
+    parent = (WSGIDirectoryConfig *)base_conf;
+    child = (WSGIDirectoryConfig *)new_conf;
+
+    if (child->process_name)
+        config->process_name = child->process_name;
+    else
+        config->process_name = parent->process_name;
+
+    if (child->application_group)
+        config->application_group = child->application_group;
+    else
+        config->application_group = parent->application_group;
+
+    if (child->callable_object)
+        config->callable_object = child->callable_object;
+    else
+        config->callable_object = parent->callable_object;
+
+    if (child->pass_authorization != -1)
+        config->pass_authorization = child->pass_authorization;
+    else
+        config->pass_authorization = parent->pass_authorization;
+
+    if (child->script_reloading != -1)
+        config->script_reloading = child->script_reloading;
+    else
+        config->script_reloading = parent->script_reloading;
+
+    if (child->reload_mechanism != -1)
+        config->reload_mechanism = child->reload_mechanism;
+    else
+        config->reload_mechanism = parent->reload_mechanism;
+
+    if (child->output_buffering != -1)
+        config->output_buffering = child->output_buffering;
+    else
+        config->output_buffering = parent->output_buffering;
+
+    return config;
+}
+
+typedef struct {
+    apr_pool_t *pool;
+
+    const char *process_name;
+    const char *application_group;
+    const char *callable_object;
+
+    int pass_authorization;
+    int script_reloading;
+    int reload_mechanism;
+    int output_buffering;
+} WSGIRequestConfig;
+
+static const char *wsgi_script_name(request_rec *r)
+{
+    int path_info_start = 0;
+
+    if (!r->path_info || !*r->path_info)
+        return r->uri;
+
+    path_info_start = ap_find_path_info(r->uri, r->path_info);
+
+    return apr_pstrndup(r->pool, r->uri, path_info_start);
+}
+
+static const char *wsgi_process_name(request_rec *r, const char *s)
+{
+    const char *name = NULL;
+    const char *value = NULL;
+
+    if (!s)
+        return "";
+
+    if (*s != '%')
+        return s;
+
+    name = s + 1;
+
+    if (*name) {
+        if (!strcmp(name, "{GLOBAL}"))
+            return "";
+
+        if (strstr(name, "{ENV:") == name) {
+            int len = 0;
+
+            name = name + 5;
+            len = strlen(name);
+
+            if (len && name[len-1] == '}') {
+                name = apr_pstrndup(r->pool, name, len-1);
+
+                value = apr_table_get(r->notes, name);
+
+                if (!value)
+                    value = apr_table_get(r->subprocess_env, name);
+
+                if (!value)
+                    value = getenv(name);
+
+                if (value)
+                    return value;
+            }
+        }
+    }
+
+    return s;
+}
+
+static const char *wsgi_application_group(request_rec *r, const char *s)
+{
+    const char *name = NULL;
+    const char *value = NULL;
+
+    const char *h = NULL;
+    apr_port_t p = 0;
+    const char *n = NULL;
+
+    if (!s) {
+        h = r->server->server_hostname;
+        p = ap_get_server_port(r);
+        n = wsgi_script_name(r);
+
+        if (p != DEFAULT_HTTP_PORT && p != DEFAULT_HTTPS_PORT)
+            return apr_psprintf(r->pool, "%s:%u|%s", h, p, n);
+        else
+            return apr_psprintf(r->pool, "%s|%s", h, n);
+    }
+
+    if (*s != '%')
+        return s;
+
+    name = s + 1;
+
+    if (*name) {
+        if (!strcmp(name, "{RESOURCE}")) {
+            h = r->server->server_hostname;
+            p = ap_get_server_port(r);
+            n = wsgi_script_name(r);
+
+            if (p != DEFAULT_HTTP_PORT && p != DEFAULT_HTTPS_PORT)
+                return apr_psprintf(r->pool, "%s:%u|%s", h, p, n);
+            else
+                return apr_psprintf(r->pool, "%s|%s", h, n);
+        }
+
+        if (!strcmp(name, "{SERVER}")) {
+            h = r->server->server_hostname;
+            p = ap_get_server_port(r);
+
+            if (p != DEFAULT_HTTP_PORT && p != DEFAULT_HTTPS_PORT)
+                return apr_psprintf(r->pool, "%s:%u", h, p);
+            else
+                return h;
+        }
+
+        if (!strcmp(name, "{GLOBAL}"))
+            return "";
+
+        if (strstr(name, "{ENV:") == name) {
+            int len = 0;
+
+            name = name + 5;
+            len = strlen(name);
+
+            if (len && name[len-1] == '}') {
+                name = apr_pstrndup(r->pool, name, len-1);
+
+                value = apr_table_get(r->notes, name);
+
+                if (!value)
+                    value = apr_table_get(r->subprocess_env, name);
+
+                if (!value)
+                    value = getenv(name);
+
+                if (value)
+                    return value;
+            }
+        }
+    }
+
+    return s;
+}
+
+static const char *wsgi_callable_object(request_rec *r, const char *s)
+{
+    const char *name = NULL;
+    const char *value = NULL;
+
+    if (!s)
+        return "application";
+
+    if (*s != '%')
+        return s;
+
+    name = s + 1;
+
+    if (!*name)
+        return "application";
+
+    if (strstr(name, "{ENV:") == name) {
+        int len = 0;
+
+        name = name + 5;
+        len = strlen(name);
+
+        if (len && name[len-1] == '}') {
+            name = apr_pstrndup(r->pool, name, len-1);
+
+            value = apr_table_get(r->notes, name);
+
+            if (!value)
+                value = apr_table_get(r->subprocess_env, name);
+
+            if (!value)
+                value = getenv(name);
+
+            if (value)
+                return value;
+        }
+    }
+
+    return "application";
+}
+
+static WSGIRequestConfig *wsgi_create_req_config(apr_pool_t *p, request_rec *r)
+{
+    WSGIRequestConfig *config = NULL;
+    WSGIServerConfig *sconfig = NULL;
+    WSGIDirectoryConfig *dconfig = NULL;
+
+    config = (WSGIRequestConfig *)apr_pcalloc(p, sizeof(WSGIRequestConfig));
+
+    dconfig = ap_get_module_config(r->per_dir_config, &wsgi_module);
+    sconfig = ap_get_module_config(r->server->module_config, &wsgi_module);
+
+    config->pool = p;
+
+    config->process_name = dconfig->process_name;
+
+    if (!config->process_name)
+        config->process_name = sconfig->process_name;
+
+    config->process_name = wsgi_process_name(r, config->process_name);
+
+    config->application_group = dconfig->application_group;
+
+    if (!config->application_group)
+        config->application_group = sconfig->application_group;
+
+    config->application_group = wsgi_application_group(r,
+                                    config->application_group);
+
+    config->callable_object = dconfig->callable_object;
+
+    if (!config->callable_object)
+        config->callable_object = sconfig->callable_object;
+
+    config->callable_object = wsgi_callable_object(r, config->callable_object);
+
+    config->pass_authorization = dconfig->pass_authorization;
+
+    if (config->pass_authorization < 0) {
+        config->pass_authorization = sconfig->pass_authorization;
+        if (config->pass_authorization < 0)
+            config->pass_authorization = 0;
+    }
+
+    config->script_reloading = dconfig->script_reloading;
+
+    if (config->script_reloading < 0) {
+        config->script_reloading = sconfig->script_reloading;
+        if (config->script_reloading < 0)
+            config->script_reloading = 1;
+    }
+
+    config->reload_mechanism = dconfig->reload_mechanism;
+
+    if (config->reload_mechanism < 0) {
+        config->reload_mechanism = sconfig->reload_mechanism;
+        if (config->reload_mechanism < 0)
+            config->reload_mechanism = 0;
+    }
+
+    config->output_buffering = dconfig->output_buffering;
+
+    if (config->output_buffering < 0) {
+        config->output_buffering = sconfig->output_buffering;
+        if (config->output_buffering < 0)
+            config->output_buffering = 0;
+    }
+
+    return config;
 }
 
 /*
@@ -1039,11 +1470,7 @@ static PyTypeObject Input_Type = {
 typedef struct {
         PyObject_HEAD
         request_rec *r;
-        const char *interpreter;
-        const char *callable;
-        int reloading;
-        int mechanism;
-        int buffering;
+        WSGIRequestConfig *config;
         int status;
         PyObject *headers;
         PyObject *sequence;
@@ -1052,10 +1479,7 @@ typedef struct {
 
 static PyTypeObject Adapter_Type;
 
-static AdapterObject *newAdapterObject(request_rec *r, LogObject *log,
-                                       const char *interpreter,
-                                       const char *callable, int reloading,
-                                       int mechanism, int buffering)
+static AdapterObject *newAdapterObject(request_rec *r, LogObject *log)
 {
     AdapterObject *self;
 
@@ -1064,11 +1488,10 @@ static AdapterObject *newAdapterObject(request_rec *r, LogObject *log,
         return NULL;
 
     self->r = r;
-    self->interpreter = interpreter;
-    self->callable = callable;
-    self->reloading = reloading;
-    self->mechanism = mechanism;
-    self->buffering = buffering;
+
+    self->config = (WSGIRequestConfig *)ap_get_module_config(r->request_config,
+                                                             &wsgi_module);
+
     self->status = -1;
     self->headers = NULL;
     self->sequence = NULL;
@@ -1228,7 +1651,7 @@ static int Adapter_output(AdapterObject *self,
 
     if (length) {
         ap_rwrite(data, length, self->r);
-        if (!self->buffering)
+        if (!self->config->output_buffering)
             ap_rflush(self->r);
     }
 
@@ -1340,23 +1763,27 @@ static PyObject *Adapter_environ(AdapterObject *self)
 
     /* Now setup some mod_wsgi specific environment values. */
 
-    object = PyString_FromString(self->interpreter);
+    object = PyString_FromString(self->config->process_name);
+    PyDict_SetItemString(environ, "mod_wsgi.process_name", object);
+    Py_DECREF(object);
+
+    object = PyString_FromString(self->config->application_group);
     PyDict_SetItemString(environ, "mod_wsgi.application_group", object);
     Py_DECREF(object);
 
-    object = PyString_FromString(self->callable);
-    PyDict_SetItemString(environ, "mod_wsgi.script_callable", object);
+    object = PyString_FromString(self->config->callable_object);
+    PyDict_SetItemString(environ, "mod_wsgi.callable_object", object);
     Py_DECREF(object);
 
-    object = PyBool_FromLong(self->reloading);
+    object = PyBool_FromLong(self->config->script_reloading);
     PyDict_SetItemString(environ, "mod_wsgi.script_reloading", object);
     Py_DECREF(object);
 
-    object = PyInt_FromLong(self->mechanism);
+    object = PyInt_FromLong(self->config->reload_mechanism);
     PyDict_SetItemString(environ, "mod_wsgi.reload_mechanism", object);
     Py_DECREF(object);
 
-    object = PyBool_FromLong(self->buffering);
+    object = PyBool_FromLong(self->config->output_buffering);
     PyDict_SetItemString(environ, "mod_wsgi.output_buffering", object);
     Py_DECREF(object);
 
@@ -1755,7 +2182,7 @@ static InterpreterObject *newInterpreterObject(const char *name,
     PySys_SetObject("stderr", object);
     Py_DECREF(object);
 
-    if (wsgi_server_config->xstdout != 0) {
+    if (wsgi_server_config->restrict_stdout != 0) {
         object = (PyObject *)newRestrictedObject("sys.stdout");
         PySys_SetObject("stdout", object);
         Py_DECREF(object);
@@ -1766,7 +2193,7 @@ static InterpreterObject *newInterpreterObject(const char *name,
         Py_DECREF(object);
     }
 
-    if (wsgi_server_config->xstdin != 0) {
+    if (wsgi_server_config->restrict_stdin != 0) {
         object = (PyObject *)newRestrictedObject("sys.stdin");
         PySys_SetObject("stdin", object);
         Py_DECREF(object);
@@ -1790,7 +2217,7 @@ static InterpreterObject *newInterpreterObject(const char *name,
      * if appropriate.
      */
 
-    if (wsgi_server_config->xsignal != 0) {
+    if (wsgi_server_config->restrict_signal != 0) {
         module = PyImport_ImportModule("signal");
         PyModule_AddObject(module, "signal", PyCFunction_New(
                            &wsgi_signal_method[0], NULL));
@@ -2274,7 +2701,7 @@ static void wsgi_python_init(apr_pool_t *p)
 
         /* Check for optimisation flag. */
 
-        if (wsgi_server_config->optimize > 0)
+        if (wsgi_server_config->python_optimize > 0)
             Py_OptimizeFlag = 2;
         else
             Py_OptimizeFlag = 0;
@@ -2428,6 +2855,11 @@ static InterpreterObject *wsgi_acquire_interpreter(const char *name)
     return handle;
 }
 
+static void wsgi_remove_interpreter(const char *name)
+{
+    PyDict_DelItemString(wsgi_interpreters, name);
+}
+
 static void wsgi_release_interpreter(InterpreterObject *handle)
 {
     PyThreadState *tstate = NULL;
@@ -2473,38 +2905,46 @@ static void wsgi_release_interpreter(InterpreterObject *handle)
  * Code for importing a module from source by absolute path.
  */
 
-static PyObject *wsgi_load_source(const char *name, request_rec *r,
-                                  const char *interpreter, int found)
+static PyObject *wsgi_load_source(request_rec *r, const char *name, int found)
 {
+    WSGIRequestConfig *config = NULL;
+
     FILE *fp = NULL;
     PyObject *m = NULL;
     PyObject *co = NULL;
     struct _node *n = NULL;
 
+    config = (WSGIRequestConfig *)ap_get_module_config(r->request_config,
+                                                       &wsgi_module);
+
     if (found) {
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
         ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0,
-                     "mod_wsgi (pid=%d, interpreter='%s'): "
+                     "mod_wsgi (pid=%d, process='%s', group='%s'): "
                      "Reloading WSGI script '%s'.", getpid(),
-                     interpreter, r->filename);
+                     config->process_name, config->application_group,
+                     r->filename);
 #else
         ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, 0,
-                     "mod_wsgi (pid=%d, interpreter='%s'): "
+                     "mod_wsgi (pid=%d, process='%s', group='%s'): "
                      "Reloading WSGI script '%s'.", getpid(),
-                     interpreter, r->filename);
+                     config->process_name, config->application_group,
+                     r->filename);
 #endif
     }
     else {
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
         ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0,
-                     "mod_wsgi (pid=%d, interpreter='%s'): "
+                     "mod_wsgi (pid=%d, process='%s', group='%s'): "
                      "Loading WSGI script '%s'.", getpid(),
-                     interpreter, r->filename);
+                     config->process_name, config->application_group,
+                     r->filename);
 #else
         ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, 0,
-                     "mod_wsgi (pid=%d, interpreter='%s'): "
+                     "mod_wsgi (pid=%d, process='%s', group='%s'): "
                      "Loading WSGI script '%s'.", getpid(),
-                     interpreter, r->filename);
+                     config->process_name, config->application_group,
+                     r->filename);
 #endif
     }
 
@@ -2579,10 +3019,10 @@ static char *wsgi_module_name(request_rec *r)
     return apr_pstrcat(r->pool, "_mod_wsgi_", hash, NULL);
 }
 
-static int wsgi_execute_script(request_rec *r, const char *interpreter,
-                                     const char *callable, int reloading,
-                                     int mechanism, int buffering)
+static int wsgi_execute_script(request_rec *r)
 {
+    WSGIRequestConfig *config = NULL;
+
     InterpreterObject *interp = NULL;
     PyObject *modules = NULL;
     PyObject *module = NULL;
@@ -2592,22 +3032,27 @@ static int wsgi_execute_script(request_rec *r, const char *interpreter,
 
     int status;
 
+    /* Grab request configuration. */
+
+    config = (WSGIRequestConfig *)ap_get_module_config(r->request_config,
+                                                       &wsgi_module);
+
     /*
      * Acquire the desired python interpreter. Once this is done
      * it is safe to start manipulating python objects.
      */
 
-    interp = wsgi_acquire_interpreter(interpreter);
+    interp = wsgi_acquire_interpreter(config->application_group);
 
     if (!interp) {
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
         ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, r,
                      "mod_wsgi (pid=%d): Cannot acquire interpreter '%s'.",
-                     getpid(), interpreter);
+                     getpid(), config->application_group);
 #else
         ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, r,
                      "mod_wsgi (pid=%d): Cannot acquire interpreter '%s'.",
-                     getpid(), interpreter);
+                     getpid(), config->application_group);
 #endif
 
         if (Py_FlushLine())
@@ -2656,7 +3101,7 @@ static int wsgi_execute_script(request_rec *r, const char *interpreter,
      * is finished.
      */
 
-    if (module && reloading) {
+    if (module && config->script_reloading) {
         if (wsgi_reload_required(r, module)) {
             /* Discard reference to loaded module. */
 
@@ -2665,10 +3110,10 @@ static int wsgi_execute_script(request_rec *r, const char *interpreter,
 
             /* Check for interpreter or module reloading. */
 
-            if (mechanism == 1 && *interpreter) {
+            if (config->reload_mechanism == 1 && *config->application_group) {
                 /* Remove interpreter from set of interpreters. */
 
-                PyDict_DelItemString(wsgi_interpreters, interpreter);
+                wsgi_remove_interpreter(config->application_group);
 
                 /*
                  * Release the interpreter. If nothing else is
@@ -2689,17 +3134,19 @@ static int wsgi_execute_script(request_rec *r, const char *interpreter,
                  * also reacquires the Python GIL for us.
                  */
 
-                interp = wsgi_acquire_interpreter(interpreter);
+                interp = wsgi_acquire_interpreter(config->application_group);
 
                 if (!interp) {
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
                     ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, r,
                                  "mod_wsgi (pid=%d): Cannot acquire "
-                                 "interpreter '%s'.", getpid(), interpreter);
+                                 "interpreter '%s'.", getpid(),
+                                 config->application_group);
 #else
                     ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, r,
                                  "mod_wsgi (pid=%d): Cannot acquire "
-                                 "interpreter '%s'.", getpid(), interpreter);
+                                 "interpreter '%s'.", getpid(),
+                                 config->application_group);
 #endif
 
                     if (Py_FlushLine())
@@ -2724,7 +3171,7 @@ static int wsgi_execute_script(request_rec *r, const char *interpreter,
     /* Load module if not already loaded. */
 
     if (!module)
-        module = wsgi_load_source(name, r, interpreter, found);
+        module = wsgi_load_source(r, name, found);
 
     /* Safe now to release the module lock. */
 
@@ -2753,12 +3200,11 @@ static int wsgi_execute_script(request_rec *r, const char *interpreter,
         PyObject *object = NULL;
 
         module_dict = PyModule_GetDict(module);
-        object = PyDict_GetItemString(module_dict, callable);
+        object = PyDict_GetItemString(module_dict, config->callable_object);
 
         if (object) {
             AdapterObject *adapter = NULL;
-            adapter = newAdapterObject(r, log, interpreter, callable,
-                                       reloading, mechanism, buffering);
+            adapter = newAdapterObject(r, log);
 
             Py_INCREF(object);
 
@@ -2775,13 +3221,13 @@ static int wsgi_execute_script(request_rec *r, const char *interpreter,
                           "mod_wsgi (pid=%d): Target WSGI script '%s' does "
                           "not contain WSGI application '%s'.",
                           getpid(), r->filename, apr_pstrcat(r->pool,
-                          r->filename, "::", callable, NULL));
+                          r->filename, "::", config->callable_object, NULL));
 #else
             ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, r,
                           "mod_wsgi (pid=%d): Target WSGI script '%s' does "
                           "not contain WSGI application '%s'.",
                           getpid(), r->filename, apr_pstrcat(r->pool,
-                          r->filename, "::", callable, NULL));
+                          r->filename, "::", config->callable_object, NULL));
 #endif
 
             status = HTTP_NOT_FOUND;
@@ -3070,174 +3516,22 @@ static void wsgi_python_child_init(apr_pool_t *p)
 #endif
 }
 
-/* Configuration management. */
-
-static void *wsgi_create_server_config(apr_pool_t *p, server_rec *s)
-{
-    WSGIServerConfig *config = NULL;
-
-    config = newWSGIServerConfig(p);
-
-    return config;
-}
-
-static void *wsgi_merge_server_config(apr_pool_t *p, void *base_conf,
-                                      void *new_conf)
-{
-    WSGIServerConfig *config = NULL;
-    WSGIServerConfig *parent = NULL;
-    WSGIServerConfig *child = NULL;
-
-    config = newWSGIServerConfig(p);
-
-    parent = (WSGIServerConfig *)base_conf;
-    child = (WSGIServerConfig *)new_conf;
-
-    if (child->aliases && parent->aliases) {
-        config->aliases = apr_array_append(p, child->aliases, parent->aliases);
-    }
-    else if (child->aliases) {
-        config->aliases = apr_array_make(p, 20, sizeof(WSGIAliasEntry));
-        apr_array_cat(config->aliases, child->aliases);
-    }
-    else if (parent->aliases) {
-        config->aliases = apr_array_make(p, 20, sizeof(WSGIAliasEntry));
-        apr_array_cat(config->aliases, parent->aliases);
-    }
-
-    if (child->interpreter)
-        config->interpreter = child->interpreter;
-    else
-        config->interpreter = parent->interpreter;
-
-    if (child->callable)
-        config->callable = child->callable;
-    else
-        config->callable = parent->callable;
-
-    if (child->authorize != -1)
-        config->authorize = child->authorize;
-    else
-        config->authorize = parent->authorize;
-
-    if (child->reloading != -1)
-        config->reloading = child->reloading;
-    else
-        config->reloading = parent->reloading;
-
-    if (child->mechanism != -1)
-        config->mechanism = child->mechanism;
-    else
-        config->mechanism = parent->mechanism;
-
-    if (child->buffering != -1)
-        config->buffering = child->buffering;
-    else
-        config->buffering = parent->buffering;
-
-    if (child->xstdin != -1)
-        config->xstdin = child->xstdin;
-    else
-        config->xstdin = parent->xstdin;
-
-    if (child->xstdout != -1)
-        config->xstdout = child->xstdout;
-    else
-        config->xstdout = parent->xstdout;
-
-    if (child->xsignal != -1)
-        config->xsignal = child->xsignal;
-    else
-        config->xsignal = parent->xsignal;
-
-    return config;
-}
-
-static void *wsgi_create_dir_config(apr_pool_t *p, char *dir)
-{
-    WSGIServerConfig *config = NULL;
-
-    config = newWSGIServerConfig(p);
-
-    return config;
-}
-
-static void *wsgi_merge_dir_config(apr_pool_t *p, void *base_conf,
-                                   void *new_conf)
-{
-    WSGIServerConfig *config = NULL;
-    WSGIServerConfig *parent = NULL;
-    WSGIServerConfig *child = NULL;
-
-    config = newWSGIServerConfig(p);
-
-    parent = (WSGIServerConfig *)base_conf;
-    child = (WSGIServerConfig *)new_conf;
-
-    if (child->interpreter)
-        config->interpreter = child->interpreter;
-    else
-        config->interpreter = parent->interpreter;
-
-    if (child->callable)
-        config->callable = child->callable;
-    else
-        config->callable = parent->callable;
-
-    if (child->authorize != -1)
-        config->authorize = child->authorize;
-    else
-        config->authorize = parent->authorize;
-
-    if (child->reloading != -1)
-        config->reloading = child->reloading;
-    else
-        config->reloading = parent->reloading;
-
-    if (child->mechanism != -1)
-        config->mechanism = child->mechanism;
-    else
-        config->mechanism = parent->mechanism;
-
-    if (child->buffering != -1)
-        config->buffering = child->buffering;
-    else
-        config->buffering = parent->buffering;
-
-    if (child->xstdin != -1)
-        config->xstdin = child->xstdin;
-    else
-        config->xstdin = parent->xstdin;
-
-    if (child->xstdout != -1)
-        config->xstdout = child->xstdout;
-    else
-        config->xstdout = parent->xstdout;
-
-    if (child->xsignal != -1)
-        config->xsignal = child->xsignal;
-    else
-        config->xsignal = parent->xsignal;
-
-    return config;
-}
-
 /* The processors for directives. */
 
-static const char *wsgi_script_alias_directive(cmd_parms *cmd, void *mconfig,
-                                               const char *l, const char *a)
+static const char *wsgi_add_script_alias(cmd_parms *cmd, void *mconfig,
+                                         const char *l, const char *a)
 {
     WSGIServerConfig *config = NULL;
     WSGIAliasEntry *entry = NULL;
 
     config = ap_get_module_config(cmd->server->module_config, &wsgi_module);
 
-    if (!config->aliases) {
-        config->aliases = apr_array_make(config->pool, 20,
-                                         sizeof(WSGIAliasEntry));
+    if (!config->alias_list) {
+        config->alias_list = apr_array_make(config->pool, 20,
+                                            sizeof(WSGIAliasEntry));
     }
 
-    entry = (WSGIAliasEntry *)apr_array_push(config->aliases);
+    entry = (WSGIAliasEntry *)apr_array_push(config->alias_list);
 
     if (cmd->info) {
         entry->regexp = ap_pregcomp(cmd->pool, l, AP_REG_EXTENDED);
@@ -3251,180 +3545,198 @@ static const char *wsgi_script_alias_directive(cmd_parms *cmd, void *mconfig,
     return NULL;
 }
 
-static const char *wsgi_optimize_directive(cmd_parms *cmd, void *mconfig,
+static const char *wsgi_set_python_optimize(cmd_parms *cmd, void *mconfig,
+                                            const char *f)
+{
+    const char *error = NULL;
+    WSGIServerConfig *sconfig = NULL;
+
+    error = ap_check_cmd_context(cmd, GLOBAL_ONLY);
+    if (error != NULL)
+        return error;
+
+    sconfig = ap_get_module_config(cmd->server->module_config, &wsgi_module);
+    sconfig->python_optimize = !strcasecmp(f, "On");
+
+    return NULL;
+}
+
+static const char *wsgi_set_restrict_stdin(cmd_parms *cmd, void *mconfig,
                                            const char *f)
 {
     const char *error = NULL;
-    WSGIServerConfig *config = NULL;
+    WSGIServerConfig *sconfig = NULL;
 
     error = ap_check_cmd_context(cmd, GLOBAL_ONLY);
     if (error != NULL)
         return error;
 
-    config = ap_get_module_config(cmd->server->module_config, &wsgi_module);
-    config->optimize = !strcasecmp(f, "On");
+    sconfig = ap_get_module_config(cmd->server->module_config, &wsgi_module);
+    sconfig->restrict_stdin = !!strcasecmp(f, "Off");
 
     return NULL;
 }
 
-static const char *wsgi_authorization_directive(cmd_parms *cmd, void *mconfig,
-                                                const char *f)
-{
-    if (cmd->path) {
-        WSGIServerConfig *dconfig = NULL;
-        dconfig = (WSGIServerConfig *)mconfig;
-        dconfig->authorize = !strcasecmp(f, "On");
-    }
-    else {
-        WSGIServerConfig *sconfig = NULL;
-        sconfig = ap_get_module_config(cmd->server->module_config,
-                                       &wsgi_module);
-        sconfig->authorize = !strcasecmp(f, "On");
-    }
-
-    return NULL;
-}
-
-static const char *wsgi_interpreter_directive(cmd_parms *cmd, void *mconfig,
-                                                const char *n)
-{
-    if (cmd->path) {
-        WSGIServerConfig *dconfig = NULL;
-        dconfig = (WSGIServerConfig *)mconfig;
-        dconfig->interpreter = n;
-    }
-    else {
-        WSGIServerConfig *sconfig = NULL;
-        sconfig = ap_get_module_config(cmd->server->module_config,
-                                       &wsgi_module);
-        sconfig->interpreter = n;
-    }
-
-    return NULL;
-}
-
-static const char *wsgi_callable_directive(cmd_parms *cmd, void *mconfig,
-                                           const char *n)
-{
-    if (cmd->path) {
-        WSGIServerConfig *dconfig = NULL;
-        dconfig = (WSGIServerConfig *)mconfig;
-        dconfig->callable = n;
-    }
-    else {
-        WSGIServerConfig *sconfig = NULL;
-        sconfig = ap_get_module_config(cmd->server->module_config,
-                                       &wsgi_module);
-        sconfig->callable = n;
-    }
-
-    return NULL;
-}
-
-static const char *wsgi_reloading_directive(cmd_parms *cmd, void *mconfig,
+static const char *wsgi_set_restrict_stdout(cmd_parms *cmd, void *mconfig,
                                             const char *f)
 {
-    if (cmd->path) {
-        WSGIServerConfig *dconfig = NULL;
-        dconfig = (WSGIServerConfig *)mconfig;
-        dconfig->reloading = !strcasecmp(f, "On");
-    }
-    else {
-        WSGIServerConfig *sconfig = NULL;
-        sconfig = ap_get_module_config(cmd->server->module_config,
-                                       &wsgi_module);
-        sconfig->reloading = !strcasecmp(f, "On");
-    }
+    const char *error = NULL;
+    WSGIServerConfig *sconfig = NULL;
+
+    error = ap_check_cmd_context(cmd, GLOBAL_ONLY);
+    if (error != NULL)
+        return error;
+
+    sconfig = ap_get_module_config(cmd->server->module_config, &wsgi_module);
+    sconfig->restrict_stdout = !!strcasecmp(f, "Off");
 
     return NULL;
 }
 
-static const char *wsgi_mechanism_directive(cmd_parms *cmd, void *mconfig,
+static const char *wsgi_set_restrict_signal(cmd_parms *cmd, void *mconfig,
                                             const char *f)
 {
+    const char *error = NULL;
+    WSGIServerConfig *sconfig = NULL;
+
+    error = ap_check_cmd_context(cmd, GLOBAL_ONLY);
+    if (error != NULL)
+        return error;
+
+    sconfig = ap_get_module_config(cmd->server->module_config, &wsgi_module);
+    sconfig->restrict_signal = !!strcasecmp(f, "Off");
+
+    return NULL;
+}
+
+static const char *wsgi_set_process_name(cmd_parms *cmd, void *mconfig,
+                                         const char *n)
+{
     if (cmd->path) {
-        WSGIServerConfig *dconfig = NULL;
-        dconfig = (WSGIServerConfig *)mconfig;
+        WSGIDirectoryConfig *dconfig = NULL;
+        dconfig = (WSGIDirectoryConfig *)mconfig;
+        dconfig->process_name = n;
+    }
+    else {
+        WSGIServerConfig *sconfig = NULL;
+        sconfig = ap_get_module_config(cmd->server->module_config,
+                                       &wsgi_module);
+        sconfig->process_name = n;
+    }
+
+    return NULL;
+}
+
+static const char *wsgi_set_application_group(cmd_parms *cmd, void *mconfig,
+                                              const char *n)
+{
+    if (cmd->path) {
+        WSGIDirectoryConfig *dconfig = NULL;
+        dconfig = (WSGIDirectoryConfig *)mconfig;
+        dconfig->application_group = n;
+    }
+    else {
+        WSGIServerConfig *sconfig = NULL;
+        sconfig = ap_get_module_config(cmd->server->module_config,
+                                       &wsgi_module);
+        sconfig->application_group = n;
+    }
+
+    return NULL;
+}
+
+static const char *wsgi_set_callable_object(cmd_parms *cmd, void *mconfig,
+                                            const char *n)
+{
+    if (cmd->path) {
+        WSGIDirectoryConfig *dconfig = NULL;
+        dconfig = (WSGIDirectoryConfig *)mconfig;
+        dconfig->callable_object = n;
+    }
+    else {
+        WSGIServerConfig *sconfig = NULL;
+        sconfig = ap_get_module_config(cmd->server->module_config,
+                                       &wsgi_module);
+        sconfig->callable_object = n;
+    }
+
+    return NULL;
+}
+
+static const char *wsgi_set_pass_authorization(cmd_parms *cmd, void *mconfig,
+                                               const char *f)
+{
+    if (cmd->path) {
+        WSGIDirectoryConfig *dconfig = NULL;
+        dconfig = (WSGIDirectoryConfig *)mconfig;
+        dconfig->pass_authorization = !strcasecmp(f, "On");
+    }
+    else {
+        WSGIServerConfig *sconfig = NULL;
+        sconfig = ap_get_module_config(cmd->server->module_config,
+                                       &wsgi_module);
+        sconfig->pass_authorization = !strcasecmp(f, "On");
+    }
+
+    return NULL;
+}
+
+static const char *wsgi_set_script_reloading(cmd_parms *cmd, void *mconfig,
+                                             const char *f)
+{
+    if (cmd->path) {
+        WSGIDirectoryConfig *dconfig = NULL;
+        dconfig = (WSGIDirectoryConfig *)mconfig;
+        dconfig->script_reloading = !strcasecmp(f, "On");
+    }
+    else {
+        WSGIServerConfig *sconfig = NULL;
+        sconfig = ap_get_module_config(cmd->server->module_config,
+                                       &wsgi_module);
+        sconfig->script_reloading = !strcasecmp(f, "On");
+    }
+
+    return NULL;
+}
+
+static const char *wsgi_set_reload_mechanism(cmd_parms *cmd, void *mconfig,
+                                             const char *f)
+{
+    if (cmd->path) {
+        WSGIDirectoryConfig *dconfig = NULL;
+        dconfig = (WSGIDirectoryConfig *)mconfig;
         if (!strcasecmp(f, "Interpreter"))
-            dconfig->mechanism = 1;
+            dconfig->reload_mechanism = 1;
         else
-            dconfig->mechanism = 0;
+            dconfig->reload_mechanism = 0;
     }
     else {
         WSGIServerConfig *sconfig = NULL;
         sconfig = ap_get_module_config(cmd->server->module_config,
                                        &wsgi_module);
         if (!strcasecmp(f, "Interpreter"))
-            sconfig->mechanism = 1;
+            sconfig->reload_mechanism = 1;
         else
-            sconfig->mechanism = 0;
+            sconfig->reload_mechanism = 0;
     }
 
     return NULL;
 }
 
-static const char *wsgi_buffering_directive(cmd_parms *cmd, void *mconfig,
-                                                const char *f)
+static const char *wsgi_set_output_buffering(cmd_parms *cmd, void *mconfig,
+                                             const char *f)
 {
     if (cmd->path) {
-        WSGIServerConfig *dconfig = NULL;
-        dconfig = (WSGIServerConfig *)mconfig;
-        dconfig->buffering = !strcasecmp(f, "On");
+        WSGIDirectoryConfig *dconfig = NULL;
+        dconfig = (WSGIDirectoryConfig *)mconfig;
+        dconfig->output_buffering = !strcasecmp(f, "On");
     }
     else {
         WSGIServerConfig *sconfig = NULL;
         sconfig = ap_get_module_config(cmd->server->module_config,
                                        &wsgi_module);
-        sconfig->buffering = !strcasecmp(f, "On");
+        sconfig->output_buffering = !strcasecmp(f, "On");
     }
-
-    return NULL;
-}
-
-static const char *wsgi_restrict_stdin(cmd_parms *cmd, void *mconfig,
-                                       const char *f)
-{
-    const char *error = NULL;
-    WSGIServerConfig *config = NULL;
-
-    error = ap_check_cmd_context(cmd, GLOBAL_ONLY);
-    if (error != NULL)
-        return error;
-
-    config = ap_get_module_config(cmd->server->module_config, &wsgi_module);
-    config->xstdin = !!strcasecmp(f, "Off");
-
-    return NULL;
-}
-
-static const char *wsgi_restrict_stdout(cmd_parms *cmd, void *mconfig,
-                                        const char *f)
-{
-    const char *error = NULL;
-    WSGIServerConfig *config = NULL;
-
-    error = ap_check_cmd_context(cmd, GLOBAL_ONLY);
-    if (error != NULL)
-        return error;
-
-    config = ap_get_module_config(cmd->server->module_config, &wsgi_module);
-    config->xstdout = !!strcasecmp(f, "Off");
-
-    return NULL;
-}
-
-static const char *wsgi_restrict_signal(cmd_parms *cmd, void *mconfig,
-                                        const char *f)
-{
-    const char *error = NULL;
-    WSGIServerConfig *config = NULL;
-
-    error = ap_check_cmd_context(cmd, GLOBAL_ONLY);
-    if (error != NULL)
-        return error;
-
-    config = ap_get_module_config(cmd->server->module_config, &wsgi_module);
-    config->xsignal = !!strcasecmp(f, "Off");
 
     return NULL;
 }
@@ -3490,13 +3802,13 @@ static int wsgi_hook_intercept(request_rec *r)
 
     config = ap_get_module_config(r->server->module_config, &wsgi_module);
 
-    if (!config->aliases)
+    if (!config->alias_list)
         return DECLINED;
 
     if (r->uri[0] != '/' && r->uri[0])
         return DECLINED;
 
-    aliases = config->aliases;
+    aliases = config->alias_list;
     entries = (WSGIAliasEntry *)aliases->elts;
 
     for (i = 0; i < aliases->nelts; ++i) {
@@ -3563,11 +3875,18 @@ static void wsgi_log_script_error(request_rec *r, const char *e, const char *n)
 #endif
 }
 
-static void wsgi_build_environment(request_rec *r, int authorize)
+static void wsgi_build_environment(request_rec *r)
 {
+    WSGIRequestConfig *config = NULL;
+
     const char *value = NULL;
     const char *script_name = NULL;
     const char *path_info = NULL;
+
+    /* Grab request configuration. */
+
+    config = (WSGIRequestConfig *)ap_get_module_config(r->request_config,
+                                                       &wsgi_module);
 
     /* Populate environment with standard CGI variables. */
 
@@ -3596,7 +3915,7 @@ static void wsgi_build_environment(request_rec *r, int authorize)
      * which has got nothing to do with specific applications.
      */
 
-    if (authorize) {
+    if (config->pass_authorization) {
         value = apr_table_get(r->headers_in, "Authorization");
         if (value)
             apr_table_setn(r->subprocess_env, "HTTP_AUTHORIZATION", value);
@@ -3646,124 +3965,6 @@ static void wsgi_build_environment(request_rec *r, int authorize)
     }
 }
 
-static const char *wsgi_interpreter_name(request_rec *r,
-                                         const char *interpreter)
-{
-    const char *name = NULL;
-    const char *value = NULL;
-
-    const char *h = NULL;
-    apr_port_t p = 0;
-    const char *s = NULL;
-
-    if (!interpreter) {
-        h = r->server->server_hostname;
-        p = ap_get_server_port(r);
-        s = apr_table_get(r->subprocess_env, "SCRIPT_NAME");
-
-        if (p != DEFAULT_HTTP_PORT && p != DEFAULT_HTTPS_PORT)
-            return apr_psprintf(r->pool, "%s:%u|%s", h, p, s);
-        else
-            return apr_psprintf(r->pool, "%s|%s", h, s);
-    }
-
-    if (*interpreter != '%')
-        return interpreter;
-
-    name = interpreter + 1;
-
-    if (*name) {
-        if (!strcmp(name, "{RESOURCE}")) {
-            h = r->server->server_hostname;
-            p = ap_get_server_port(r);
-            s = apr_table_get(r->subprocess_env, "SCRIPT_NAME");
-
-            if (p != DEFAULT_HTTP_PORT && p != DEFAULT_HTTPS_PORT)
-                return apr_psprintf(r->pool, "%s:%u|%s", h, p, s);
-            else
-                return apr_psprintf(r->pool, "%s|%s", h, s);
-        }
-
-        if (!strcmp(name, "{SERVER}")) {
-            h = r->server->server_hostname;
-            p = ap_get_server_port(r);
-
-            if (p != DEFAULT_HTTP_PORT && p != DEFAULT_HTTPS_PORT)
-                return apr_psprintf(r->pool, "%s:%u", h, p);
-            else
-                return h;
-        }
-
-        if (!strcmp(name, "{GLOBAL}"))
-            return "";
-
-        if (strstr(name, "{ENV:") == name) {
-            int len = 0;
-
-            name = name + 5;
-            len = strlen(name);
-
-            if (len && name[len-1] == '}') {
-                name = apr_pstrndup(r->pool, name, len-1);
-
-                value = apr_table_get(r->notes, name);
-
-                if (!value)
-                    value = apr_table_get(r->subprocess_env, name);
-
-                if (!value)
-                    value = getenv(name);
-
-                if (value)
-                    return value;
-            }
-        }
-    }
-
-    return interpreter;
-}
-
-static const char *wsgi_callable_name(request_rec *r, const char *callable)
-{
-    const char *name = NULL;
-    const char *value = NULL;
-
-    if (!callable)
-        return "application";
-
-    if (*callable != '%')
-        return callable;
-
-    name = callable + 1;
-
-    if (!*name)
-        return "application";
-
-    if (strstr(name, "{ENV:") == name) {
-        int len = 0;
-
-        name = name + 5;
-        len = strlen(name);
-
-        if (len && name[len-1] == '}') {
-            name = apr_pstrndup(r->pool, name, len-1);
-
-            value = apr_table_get(r->notes, name);
-
-            if (!value)
-                value = apr_table_get(r->subprocess_env, name);
-
-            if (!value)
-                value = getenv(name);
-
-            if (value)
-                return value;
-        }
-    }
-
-    return "application";
-}
-
 static int wsgi_is_script_aliased(request_rec *r)
 {
     const char *t = NULL;
@@ -3776,15 +3977,7 @@ static int wsgi_hook_handler(request_rec *r)
 {
     int status;
 
-    WSGIServerConfig *sconfig = NULL;
-    WSGIServerConfig *dconfig = NULL;
-
-    const char *interpreter = NULL;
-    const char *callable = NULL;
-    int authorize = -1;
-    int reloading = -1;
-    int mechanism = -1;
-    int buffering = -1;
+    WSGIRequestConfig *config = NULL;
 
     /*
      * Only process requests for this module. Honour a content
@@ -3857,57 +4050,6 @@ static int wsgi_hook_handler(request_rec *r)
     }
 #endif
 
-    /* Get config relevant to this request. */
-
-    dconfig = ap_get_module_config(r->per_dir_config, &wsgi_module);
-    sconfig = ap_get_module_config(r->server->module_config, &wsgi_module);
-
-    /* Determine values of configuration settings. */
-
-    authorize = dconfig->authorize;
-
-    if (authorize < 0) {
-        authorize = sconfig->authorize;
-        if (authorize < 0)
-            authorize = 0;
-    }
-
-    interpreter = dconfig->interpreter;
-
-    if (!interpreter)
-        interpreter = sconfig->interpreter;
-
-    callable = dconfig->callable;
-
-    if (!callable)
-        callable = sconfig->callable;
-
-    callable = wsgi_callable_name(r, callable);
-
-    reloading = dconfig->reloading;
-
-    if (reloading < 0) {
-        reloading = sconfig->reloading;
-        if (reloading < 0)
-            reloading = 1;
-    }
-
-    mechanism = dconfig->mechanism;
-
-    if (mechanism < 0) {
-        mechanism = sconfig->mechanism;
-        if (mechanism < 0)
-            mechanism = 0;
-    }
-
-    buffering = dconfig->buffering;
-
-    if (buffering < 0) {
-        buffering = sconfig->buffering;
-        if (buffering < 0)
-            buffering = 0;
-    }
-
     /*
      * Setup policy to apply if request contains a body. Note
      * that it is not possible to have chunked transfer encoding
@@ -3922,18 +4064,36 @@ static int wsgi_hook_handler(request_rec *r)
     if (status != OK)
         return status;
 
+    /*
+     * Construct request configuration and cache it in the
+     * request object against this module so can access it
+     * later from handler code.
+     */
+
+    config = wsgi_create_req_config(r->pool, r);
+
+    ap_set_module_config(r->request_config, &wsgi_module, config);
+
     /* Build the sub process environment. */
 
-    wsgi_build_environment(r, authorize);
+    wsgi_build_environment(r);
 
-    /* Calculate target Python interpreter name. */
+    /*
+     * Execute the target WSGI application script or proxy
+     * request to one of the daemon processes as appropriate.
+     */
 
-    interpreter = wsgi_interpreter_name(r, interpreter);
+#if AP_SERVER_MAJORVERSION_NUMBER >= 2
+    if (*config->process_name) {
+        wsgi_log_script_error(r, "Sorry, proxying to a WSGI daemon process "
+                              "is still being implemented",
+                              r->filename);
 
-    /* Execute the target WSGI application script. */
+        return HTTP_INTERNAL_SERVER_ERROR;
+    }
+#endif
 
-    return wsgi_execute_script(r, interpreter, callable, reloading,
-                               mechanism, buffering);
+    return wsgi_execute_script(r);
 }
 
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
@@ -3976,30 +4136,34 @@ static const handler_rec wsgi_handlers[] = {
 
 static const command_rec wsgi_commands[] =
 {
-    { "WSGIScriptAlias", wsgi_script_alias_directive, NULL,
+    { "WSGIScriptAlias", wsgi_add_script_alias, NULL,
         RSRC_CONF, TAKE2, "Map location to target WSGI script file." },
-    { "WSGIScriptAliasMatch", wsgi_script_alias_directive, "*",
+    { "WSGIScriptAliasMatch", wsgi_add_script_alias, "*",
         RSRC_CONF, TAKE2, "Map location to target WSGI script file." },
-    { "WSGIPythonOptimize", wsgi_optimize_directive, NULL,
+
+    { "WSGIPythonOptimize", wsgi_set_python_optimize, NULL,
         RSRC_CONF, TAKE1, "Enable/Disable Python compiler optimisations." },
-    { "WSGIPassAuthorization", wsgi_authorization_directive, NULL,
-        RSRC_CONF, TAKE1, "Enable/Disable passing authorization headers." },
-    { "WSGIApplicationGroup", wsgi_interpreter_directive, NULL,
-        OR_FILEINFO, TAKE1, "Name of the WSGI application group to use." },
-    { "WSGIScriptCallable", wsgi_callable_directive, NULL,
-        OR_FILEINFO, TAKE1, "Name of entry point in WSGI script file." },
-    { "WSGIScriptReloading", wsgi_reloading_directive, NULL,
-        OR_FILEINFO, TAKE1, "Enable/Disable code reloading mechanism." },
-    { "WSGIReloadMechanism", wsgi_mechanism_directive, NULL,
-        OR_FILEINFO, TAKE1, "Defines what is reloaded when a reload occurs." },
-    { "WSGIOutputBuffering", wsgi_buffering_directive, NULL,
-        OR_FILEINFO, TAKE1, "Enable/Disable buffering of response." },
-    { "WSGIRestrictStdin", wsgi_restrict_stdin, NULL,
+    { "WSGIRestrictStdin", wsgi_set_restrict_stdin, NULL,
         RSRC_CONF, TAKE1, "Enable/Disable restrictions on use of STDIN." },
-    { "WSGIRestrictStdout", wsgi_restrict_stdout, NULL,
+    { "WSGIRestrictStdout", wsgi_set_restrict_stdout, NULL,
         RSRC_CONF, TAKE1, "Enable/Disable restrictions on use of STDOUT." },
-    { "WSGIRestrictSignal", wsgi_restrict_signal, NULL,
+    { "WSGIRestrictSignal", wsgi_set_restrict_signal, NULL,
         RSRC_CONF, TAKE1, "Enable/Disable restrictions on use of signal()." },
+
+    { "WSGIApplicationGroup", wsgi_set_application_group, NULL,
+        OR_FILEINFO, TAKE1, "Name of the WSGI application group to use." },
+    { "WSGICallableObject", wsgi_set_callable_object, NULL,
+        OR_FILEINFO, TAKE1, "Name of entry point in WSGI script file." },
+
+    { "WSGIPassAuthorization", wsgi_set_pass_authorization, NULL,
+        OR_FILEINFO, TAKE1, "Enable/Disable passing authorization headers." },
+    { "WSGIScriptReloading", wsgi_set_script_reloading, NULL,
+        OR_FILEINFO, TAKE1, "Enable/Disable script reloading mechanism." },
+    { "WSGIReloadMechanism", wsgi_set_reload_mechanism, NULL,
+        OR_FILEINFO, TAKE1, "Defines what is reloaded when a reload occurs." },
+    { "WSGIOutputBuffering", wsgi_set_output_buffering, NULL,
+        OR_FILEINFO, TAKE1, "Enable/Disable buffering of response." },
+
     { NULL }
 };
 
@@ -4081,7 +4245,7 @@ static apr_table_t *wsgi_daemon_sockets = NULL;
 
 static int wsgi_daemon_shutdown = 0;
 
-static const char *wsgi_daemon_directive(cmd_parms *cmd, void *mconfig,
+static const char *wsgi_add_daemon_process(cmd_parms *cmd, void *mconfig,
                                          const char *args)
 {
     const char *error = NULL;
@@ -4149,12 +4313,12 @@ static const char *wsgi_daemon_directive(cmd_parms *cmd, void *mconfig,
 
     config = ap_get_module_config(cmd->server->module_config, &wsgi_module);
 
-    if (!config->daemons) {
-        config->daemons = apr_array_make(config->pool, 20,
-                                         sizeof(WSGIDaemonEntry));
+    if (!config->daemon_list) {
+        config->daemon_list = apr_array_make(config->pool, 20,
+                                             sizeof(WSGIDaemonEntry));
     }
 
-    daemons = config->daemons;
+    daemons = config->daemon_list;
     entries = (WSGIDaemonEntry *)daemons->elts;
 
     for (i = 0; i < daemons->nelts; ++i) {
@@ -4164,7 +4328,7 @@ static const char *wsgi_daemon_directive(cmd_parms *cmd, void *mconfig,
             return "Name duplicates previous WSGI daemon definition.";
     }
 
-    entry = (WSGIDaemonEntry *)apr_array_push(config->daemons);
+    entry = (WSGIDaemonEntry *)apr_array_push(config->daemon_list);
 
     entry->server = cmd->server;
 
@@ -4180,22 +4344,23 @@ static const char *wsgi_daemon_directive(cmd_parms *cmd, void *mconfig,
     return NULL;
 }
 
-static const char *wsgi_socket_directive(cmd_parms *cmd, void *mconfig,
+static const char *wsgi_set_socket_prefix(cmd_parms *cmd, void *mconfig,
                                          const char *arg)
 {
     const char *error = NULL;
-    WSGIServerConfig *config = NULL;
+    WSGIServerConfig *sconfig = NULL;
 
     error = ap_check_cmd_context(cmd, GLOBAL_ONLY);
     if (error != NULL)
         return error;
 
-    config = ap_get_module_config(cmd->server->module_config, &wsgi_module);
+    sconfig = ap_get_module_config(cmd->server->module_config, &wsgi_module);
 
-    config->socket = ap_append_pid(cmd->pool, arg, ".");
-    config->socket = ap_server_root_relative(cmd->pool, config->socket);
+    sconfig->socket_prefix = ap_append_pid(cmd->pool, arg, ".");
+    sconfig->socket_prefix = ap_server_root_relative(cmd->pool,
+                                                     sconfig->socket_prefix);
 
-    if (!config->socket) {
+    if (!sconfig->socket_prefix) {
         return apr_pstrcat(cmd->pool, "Invalid WSGISocketPrefix '",
                            arg, "'.", NULL);
     }
@@ -4516,7 +4681,7 @@ static int wsgi_start_daemons(apr_pool_t *p)
 
     /* Do we need to create any daemon processes. */
 
-    daemons = wsgi_server_config->daemons;
+    daemons = wsgi_server_config->daemon_list;
 
     if (!daemons)
         return OK;
@@ -4540,7 +4705,8 @@ static int wsgi_start_daemons(apr_pool_t *p)
 
         entry = &entries[i];
 
-        entry->socket = apr_psprintf(p, "%s.%d", wsgi_server_config->socket,
+        entry->socket = apr_psprintf(p, "%s.%d",
+                                     wsgi_server_config->socket_prefix,
                                      entry->count);
 
         apr_table_setn(wsgi_daemon_sockets, entry->name, entry->socket);
@@ -4645,36 +4811,46 @@ static void wsgi_register_hooks(apr_pool_t *p)
 
 static const command_rec wsgi_commands[] =
 {
-    AP_INIT_TAKE2("WSGIScriptAlias", wsgi_script_alias_directive, NULL,
+    AP_INIT_TAKE2("WSGIScriptAlias", wsgi_add_script_alias, NULL,
         RSRC_CONF, "Map location to target WSGI script file."),
-    AP_INIT_TAKE2("WSGIScriptAliasMatch", wsgi_script_alias_directive, "*",
+    AP_INIT_TAKE2("WSGIScriptAliasMatch", wsgi_add_script_alias, "*",
         RSRC_CONF, "Map location pattern to target WSGI script file."),
-    AP_INIT_TAKE1("WSGIPythonOptimize", wsgi_optimize_directive, NULL,
-        RSRC_CONF, "Enable/Disable Python compiler optimisations."),
-    AP_INIT_TAKE1("WSGIPassAuthorization", wsgi_authorization_directive, NULL,
-        OR_FILEINFO, "Enable/Disable passing authorization headers."),
-    AP_INIT_TAKE1("WSGIApplicationGroup", wsgi_interpreter_directive, NULL,
-        OR_FILEINFO, "Name of the WSGI application group to use."),
-    AP_INIT_TAKE1("WSGIScriptCallable", wsgi_callable_directive, NULL,
-        OR_FILEINFO, "Name of entry point in WSGI script file."),
-    AP_INIT_TAKE1("WSGIScriptReloading", wsgi_reloading_directive, NULL,
-        OR_FILEINFO, "Enable/Disable code reloading mechanism."),
-    AP_INIT_TAKE1("WSGIReloadMechanism", wsgi_mechanism_directive, NULL,
-        OR_FILEINFO, "Defines what is reloaded when a reload occurs."),
-    AP_INIT_TAKE1("WSGIOutputBuffering", wsgi_buffering_directive, NULL,
-        OR_FILEINFO, "Enable/Disable buffering of response."),
-    AP_INIT_TAKE1("WSGIRestrictStdin", wsgi_restrict_stdin, NULL,
-        RSRC_CONF, "Enable/Disable restrictions on use of STDIN."),
-    AP_INIT_TAKE1("WSGIRestrictStdout", wsgi_restrict_stdout, NULL,
-        RSRC_CONF, "Enable/Disable restrictions on use of STDOUT."),
-    AP_INIT_TAKE1("WSGIRestrictSignal", wsgi_restrict_signal, NULL,
-        RSRC_CONF, "Enable/Disable restrictions on use of signal()."),
+
 #if !defined(WIN32)
-    AP_INIT_RAW_ARGS("WSGICreateDaemon", wsgi_daemon_directive, NULL,
+    AP_INIT_RAW_ARGS("WSGIDaemonProcess", wsgi_add_daemon_process, NULL,
         RSRC_CONF, "Specify details of daemon process to start."),
-    AP_INIT_TAKE1("WSGISocketPrefix", wsgi_socket_directive, NULL,
+    AP_INIT_TAKE1("WSGISocketPrefix", wsgi_set_socket_prefix, NULL,
         RSRC_CONF, "Path prefix for the daemon process sockets."),
 #endif
+
+    AP_INIT_TAKE1("WSGIPythonOptimize", wsgi_set_python_optimize, NULL,
+        RSRC_CONF, "Enable/Disable Python compiler optimisations."),
+    AP_INIT_TAKE1("WSGIRestrictStdin", wsgi_set_restrict_stdin, NULL,
+        RSRC_CONF, "Enable/Disable restrictions on use of STDIN."),
+    AP_INIT_TAKE1("WSGIRestrictStdout", wsgi_set_restrict_stdout, NULL,
+        RSRC_CONF, "Enable/Disable restrictions on use of STDOUT."),
+    AP_INIT_TAKE1("WSGIRestrictSignal", wsgi_set_restrict_signal, NULL,
+        RSRC_CONF, "Enable/Disable restrictions on use of signal()."),
+
+#if !defined(WIN32)
+    AP_INIT_TAKE1("WSGIProcessName", wsgi_set_process_name, NULL,
+        OR_FILEINFO, "Name of the WSGI daemon process to use."),
+#endif
+
+    AP_INIT_TAKE1("WSGIApplicationGroup", wsgi_set_application_group, NULL,
+        OR_FILEINFO, "Name of the WSGI application group to use."),
+    AP_INIT_TAKE1("WSGICallableObject", wsgi_set_callable_object, NULL,
+        OR_FILEINFO, "Name of entry point in WSGI script file."),
+
+    AP_INIT_TAKE1("WSGIPassAuthorization", wsgi_set_pass_authorization, NULL,
+        OR_FILEINFO, "Enable/Disable passing authorization headers."),
+    AP_INIT_TAKE1("WSGIScriptReloading", wsgi_set_script_reloading, NULL,
+        OR_FILEINFO, "Enable/Disable script reloading mechanism."),
+    AP_INIT_TAKE1("WSGIReloadMechanism", wsgi_set_reload_mechanism, NULL,
+        OR_FILEINFO, "Defines what is reloaded when a reload occurs."),
+    AP_INIT_TAKE1("WSGIOutputBuffering", wsgi_set_output_buffering, NULL,
+        OR_FILEINFO, "Enable/Disable buffering of response."),
+
     { NULL }
 };
 
