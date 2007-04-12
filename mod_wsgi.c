@@ -1257,12 +1257,7 @@ static PyObject *Adapter_environ(AdapterObject *self)
     int multithread = 0;
     int multiprocess = 0;
 
-    const char *value = NULL;
-    int is_https = 0;
-
-#if AP_SERVER_MAJORVERSION_NUMBER < 2
     const char *scheme = NULL;
-#endif
 
     /* Create the WSGI environment dictionary. */
 
@@ -1316,19 +1311,9 @@ static PyObject *Adapter_environ(AdapterObject *self)
 
     PyDict_SetItemString(environ, "wsgi.run_once", Py_False);
 
-#if AP_SERVER_MAJORVERSION_NUMBER >= 2
-    if (!wsgi_is_https)
-        wsgi_is_https = APR_RETRIEVE_OPTIONAL_FN(ssl_is_https);
-
-    is_https = wsgi_is_https && wsgi_is_https(r->connection);
-#else
     scheme = apr_table_get(r->subprocess_env, "HTTPS");
 
-    if (scheme && (!strcmp(scheme, "on") || !strcmp(scheme, "1")))
-        is_https = 1;
-#endif
-
-    if (is_https) {
+    if (scheme && (!strcmp(scheme, "on") || !strcmp(scheme, "1"))) {
         object = PyString_FromString("https");
         PyDict_SetItemString(environ, "wsgi.url_scheme", object);
         Py_DECREF(object);
@@ -3588,6 +3573,16 @@ static void wsgi_build_environment(request_rec *r, int authorize)
 
     ap_add_cgi_vars(r);
     ap_add_common_vars(r);
+
+    /* Determine whether connection uses HTTPS protocol. */
+
+#if AP_SERVER_MAJORVERSION_NUMBER >= 2
+    if (!wsgi_is_https)
+        wsgi_is_https = APR_RETRIEVE_OPTIONAL_FN(ssl_is_https);
+
+    if (wsgi_is_https && wsgi_is_https(r->connection))
+        apr_table_set(r->subprocess_env, "HTTPS", "1");
+#endif
 
     /*
      * If enabled, pass along authorisation headers which Apache
