@@ -4003,6 +4003,12 @@ static int wsgi_is_script_aliased(request_rec *r)
     return t && (!strcasecmp(t, "wsgi-script"));
 }
 
+#if !defined(WIN32)
+#if AP_SERVER_MAJORVERSION_NUMBER >= 2
+static int wsgi_execute_remote(request_rec *r);
+#endif
+#endif
+
 static int wsgi_hook_handler(request_rec *r)
 {
     int status;
@@ -4114,13 +4120,8 @@ static int wsgi_hook_handler(request_rec *r)
      */
 
 #if AP_SERVER_MAJORVERSION_NUMBER >= 2
-    if (*config->process_name) {
-        wsgi_log_script_error(r, "Sorry, proxying to a WSGI daemon process "
-                              "is still being implemented",
-                              r->filename);
-
-        return HTTP_INTERNAL_SERVER_ERROR;
-    }
+    if (*config->process_name)
+        return wsgi_execute_remote(r);
 #endif
 
     return wsgi_execute_script(r);
@@ -4254,6 +4255,10 @@ module MODULE_VAR_EXPORT wsgi_module = {
 #define WSGI_LISTEN_BACKLOG 100
 #endif
 
+#ifndef WSGI_CONNECT_ATTEMPTS
+#define WSGI_CONNECT_ATTEMPTS 15
+#endif
+
 typedef struct {
     server_rec *server;
     int count;
@@ -4266,6 +4271,12 @@ typedef struct {
     pid_t pid;
     const char *socket;
 } WSGIDaemonEntry;
+
+typedef struct {
+    const char *name;
+    const char *path;
+    int fd;
+} WSGIDaemonSocket;
 
 static apr_pool_t *wsgi_parent_pool = NULL;
 static apr_pool_t *wsgi_daemon_pool = NULL;
@@ -4748,6 +4759,121 @@ static int wsgi_start_daemons(apr_pool_t *p)
     }
 
     return OK;
+}
+
+static apr_status_t wsgi_close_socket(void *data)
+{
+    WSGIDaemonSocket *daemon = NULL;
+
+    daemon = (WSGIDaemonSocket *)data;
+
+    return close(daemon->fd);
+}
+
+static int wsgi_connect_daemon(request_rec *r, WSGIDaemonSocket *daemon)
+{
+    struct sockaddr_un addr;
+
+    int retries = 0;
+    apr_interval_time_t timer = 100000;
+
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    apr_cpystrn(addr.sun_path, daemon->path, sizeof addr.sun_path);
+
+    while (1) {
+        retries++;
+
+        if ((daemon->fd = socket(AF_UNIX, SOCK_STREAM, 0)) < 0) {
+            ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, errno, r,
+                         "mod_wsgi (pid=%d): Unable to create socket to "
+                         "connect to WSGI daemon process.", getpid());
+
+            return HTTP_INTERNAL_SERVER_ERROR;
+        }
+
+        if (connect(daemon->fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+            if (errno == ECONNREFUSED && retries < WSGI_CONNECT_ATTEMPTS) {
+                ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, errno, r,
+                             "mod_wsgi (pid=%d): Connection attempt #%d to "
+                             "WSGI daemon process '%s' on '%s' failed, "
+                             "sleeping before retrying again.", getpid(),
+                             retries, daemon->name, daemon->path);
+
+                close(daemon->fd);
+
+                /* Increase wait time up to maximum of 2 seconds. */
+
+                apr_sleep(timer);
+                if (timer < apr_time_from_sec(2))
+                    timer *= 2;
+            }
+            else {
+                close(daemon->fd);
+
+                ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, errno, r,
+                             "mod_wsgi (pid=%d): Unable to connect to "
+                             "WSGI daemon process '%s' on '%s' after "
+                             "multiple attempts.", getpid(), daemon->name,
+                             daemon->path);
+
+                return HTTP_SERVICE_UNAVAILABLE;
+            }
+        }
+        else {
+            apr_pool_cleanup_register(r->pool, daemon, wsgi_close_socket,
+                                      apr_pool_cleanup_null);
+
+            break;
+        }
+    }
+
+    return OK;
+}
+
+static int wsgi_execute_remote(request_rec *r)
+{
+    WSGIRequestConfig *config = NULL;
+    WSGIDaemonSocket *daemon = NULL;
+
+    int status;
+
+    /* Grab request configuration. */
+
+    config = (WSGIRequestConfig *)ap_get_module_config(r->request_config,
+                                                       &wsgi_module);
+
+    /* Find socket path for target daemon process. */
+
+    daemon = (WSGIDaemonSocket *)apr_pcalloc(r->pool,
+                                             sizeof(WSGIDaemonSocket));
+
+    daemon->name = config->process_name;
+
+    if (wsgi_daemon_sockets)
+        daemon->path = apr_table_get(wsgi_daemon_sockets, daemon->name);
+
+    if (!daemon->path) {
+        wsgi_log_script_error(r, apr_psprintf(r->pool, "No WSGI daemon "
+                              "process called '%s' has been configured",
+                              daemon->name), r->filename);
+
+        return HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    /* Creation connection to the daemon process. */
+
+    status = wsgi_connect_daemon(r, daemon);
+
+    if (status != OK)
+        return status;
+
+    /* XXX Haven't finished yet. */
+
+    wsgi_log_script_error(r, "Sorry, proxying to a WSGI daemon process "
+                          "is still being implemented", r->filename);
+
+    return HTTP_INTERNAL_SERVER_ERROR;
 }
 
 #endif
