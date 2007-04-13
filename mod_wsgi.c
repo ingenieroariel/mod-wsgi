@@ -146,7 +146,8 @@ static WSGIServerConfig *newWSGIServerConfig(apr_pool_t *p)
 
 #if AP_SERVER_MAJORVERSION_NUMBER >= 2
     object->socket_prefix = DEFAULT_REL_RUNTIMEDIR "/wsgisock";
-    object->socket_prefix = ap_append_pid(p, object->socket_prefix, ".");
+    object->socket_prefix = apr_psprintf(p, "%s.%d", object->socket_prefix,
+                                         getpid());
     object->socket_prefix = ap_server_root_relative(p, object->socket_prefix);
 #endif
 
@@ -4368,7 +4369,7 @@ static const char *wsgi_set_socket_prefix(cmd_parms *cmd, void *mconfig,
 
     sconfig = ap_get_module_config(cmd->server->module_config, &wsgi_module);
 
-    sconfig->socket_prefix = ap_append_pid(cmd->pool, arg, ".");
+    sconfig->socket_prefix = apr_psprintf(cmd->pool, "%s.%d", arg, getpid());
     sconfig->socket_prefix = ap_server_root_relative(cmd->pool,
                                                      sconfig->socket_prefix);
 
@@ -4611,7 +4612,9 @@ static int wsgi_start_process(apr_pool_t *p, WSGIDaemonEntry *daemon)
          * the parent process.
          */
 
+#if 0
         ap_close_listeners();
+#endif
 
         /*
          * Create a pool for the child daemon process so
