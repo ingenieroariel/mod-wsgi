@@ -62,6 +62,7 @@ typedef time_t apr_time_t;
 #include "apr_tables.h"
 #include "apr_strings.h"
 #include "http_config.h"
+#include "ap_listen.h"
 #endif
 
 #include "ap_config.h"
@@ -80,6 +81,22 @@ typedef time_t apr_time_t;
 typedef regex_t ap_regex_t;
 typedef regmatch_t ap_regmatch_t;
 #define AP_REG_EXTENDED REG_EXTENDED
+#endif
+#endif
+
+#if !defined(WIN32)
+#if AP_SERVER_MAJORVERSION_NUMBER >= 2
+#if !AP_MODULE_MAGIC_AT_LEAST(20051115,0)
+static void ap_close_listeners(void)
+{
+    ap_listen_rec *lr;
+
+    for (lr = ap_listeners; lr; lr = lr->next) {
+        apr_socket_close(lr->sd);
+        lr->active = 0;
+    }
+}
+#endif
 #endif
 #endif
 
@@ -2621,7 +2638,7 @@ static int wsgi_python_initialized = 0;
 static apr_pool_t *wsgi_server_pool = NULL;
 #endif
 
-static void wsgi_python_version()
+static void wsgi_python_version(void)
 {
     const char *compile = PY_VERSION;
     const char *dynamic = 0;
@@ -4612,9 +4629,7 @@ static int wsgi_start_process(apr_pool_t *p, WSGIDaemonEntry *daemon)
          * the parent process.
          */
 
-#if 0
         ap_close_listeners();
-#endif
 
         /*
          * Create a pool for the child daemon process so
