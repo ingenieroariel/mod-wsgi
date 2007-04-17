@@ -104,6 +104,14 @@ static void ap_close_listeners(void)
 #include "compile.h"
 #include "node.h"
 
+#if !defined(PY_VERSION_HEX) || PY_VERSION_HEX <= 0x02030000
+#error Sorry, mod_wsgi requires at least Python 2.3.0.
+#endif
+
+#if !defined(WITH_THREAD)
+#error Sorry, mod_wsgi requires that Python supporting thread.
+#endif
+
 /* Version information. */
 
 #define MOD_WSGI_MAJORVERSION_NUMBER 1
@@ -2127,7 +2135,7 @@ static InterpreterObject *newInterpreterObject(const char *name,
 
     save_tstate = PyThreadState_Swap(NULL);
 
-    /* Save away the name purely for logging purposes. */
+    /* Save away the interpreter name. */
 
     self->name = strdup(name);
 
@@ -2267,6 +2275,8 @@ static void Interpreter_dealloc(InterpreterObject *self)
     PyThreadState *save_tstate = NULL;
     PyObject *exitfunc = NULL;
     PyObject *module = NULL;
+
+    /* XXX Needs to cater for GIL state. */
 
     save_tstate = PyThreadState_Swap(NULL);
 
@@ -2681,9 +2691,7 @@ static apr_status_t wsgi_python_term(void *data)
                  getpid());
 #endif
 
-#if defined(WITH_THREAD)
     PyEval_AcquireLock();
-#endif
 
     interp = PyInterpreterState_Head();
     while (interp->next)
@@ -2696,9 +2704,7 @@ static apr_status_t wsgi_python_term(void *data)
 
     PyThreadState_Swap(NULL);
 
-#ifdef WITH_THREAD
     PyEval_ReleaseLock();
-#endif
 
     wsgi_python_initialized = 0;
 
@@ -2769,10 +2775,8 @@ static void wsgi_python_init(apr_pool_t *p)
 
         /* Initialise threading. */
 
-#if defined(WITH_THREAD)
         PyEval_InitThreads();
         PyEval_ReleaseLock();
-#endif
 
         PyThreadState_Swap(NULL);
 
@@ -2835,9 +2839,7 @@ static InterpreterObject *wsgi_acquire_interpreter(const char *name)
      * Python GIL is held, so need to acquire it.
      */
 
-#if defined(WITH_THREAD)
     PyEval_AcquireLock();
-#endif
 
     /*
      * Check if already have interpreter instance and
@@ -2863,20 +2865,20 @@ static InterpreterObject *wsgi_acquire_interpreter(const char *name)
     /*
      * Create new thread state object. We should only be
      * getting called where no current active thread
-     * state, so no need to remember the old one.
+     * state, so no need to remember the old one. When
+     * working with the main Python interpreter always
+     * use the simplified API for GIL locking so any
+     * extension modules which use that will still work.
      */
 
-#if defined(WITH_THREAD)
     PyEval_ReleaseLock();
-#endif
 
-    tstate = PyThreadState_New(interp);
-
-#if defined(WITH_THREAD)
-    PyEval_AcquireThread(tstate);
-#else
-    PyThreadState_Swap(tstate);
-#endif
+    if (*name) {
+        tstate = PyThreadState_New(interp);
+        PyEval_AcquireThread(tstate);
+    }
+    else
+        PyGILState_Ensure();
 
 #if APR_HAS_THREADS
     apr_thread_mutex_unlock(wsgi_interp_lock);
@@ -2897,20 +2899,22 @@ static void wsgi_release_interpreter(InterpreterObject *handle)
     /*
      * Need to release and destroy the thread state that
      * was created against the interpreter. This will
-     * release the GIL.
+     * release the GIL. Note that it should be safe to
+     * always assume that the simplified GIL state API
+     * lock was originally unlocked as always calling in
+     * from an Apache thread when we acquire the
+     * interpreter in the first place.
      */
 
-    tstate = PyThreadState_Get();
+    if (*handle->name) {
+        tstate = PyThreadState_Get();
 
-    PyThreadState_Clear(tstate);
-
-#if defined(WITH_THREAD)
-    PyEval_ReleaseThread(tstate);
-#else
-    PyThreadState_Swap(NULL);
-#endif
-
-    PyThreadState_Delete(tstate);
+        PyThreadState_Clear(tstate);
+        PyEval_ReleaseThread(tstate);
+        PyThreadState_Delete(tstate);
+    }
+    else
+        PyGILState_Release(PyGILState_UNLOCKED);
 
     /*
      * Need to reacquire the Python GIL just so we can
@@ -2920,15 +2924,11 @@ static void wsgi_release_interpreter(InterpreterObject *handle)
      * in its destruction if its the last reference.
      */
 
-#if defined(WITH_THREAD)
     PyEval_AcquireLock();
-#endif
 
     Py_DECREF(handle);
 
-#if defined(WITH_THREAD)
     PyEval_ReleaseLock();
-#endif
 }
 
 /*
@@ -3404,9 +3404,7 @@ static apr_status_t wsgi_python_child_cleanup(void *data)
     apr_thread_mutex_lock(wsgi_interp_lock);
 #endif
 
-#if defined(WITH_THREAD)
     PyEval_AcquireLock();
-#endif
 
     /*
      * Extract a handle to the main Python interpreter from
@@ -3441,9 +3439,7 @@ static apr_status_t wsgi_python_child_cleanup(void *data)
 
     Py_DECREF(interp);
 
-#if defined(WITH_THREAD)
     PyEval_ReleaseLock();
-#endif
 
     /*
      * Destroy Python itself including the main interpreter.
@@ -3469,9 +3465,7 @@ static void wsgi_python_child_init(apr_pool_t *p)
 
     /* Working with Python, so must acquire GIL. */
 
-#if defined(WITH_THREAD)
     PyEval_AcquireLock();
-#endif
 
     /*
      * Get a reference to the main Python interpreter created
@@ -3531,9 +3525,7 @@ static void wsgi_python_child_init(apr_pool_t *p)
     PyThreadState_Swap(save_tstate);
     PyThreadState_Delete(tstate);
 
-#if defined(WITH_THREAD)
     PyEval_ReleaseLock();
-#endif
 
     /* Register cleanups to performed on process shutdown. */
 
