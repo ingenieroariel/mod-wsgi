@@ -2272,16 +2272,25 @@ static InterpreterObject *newInterpreterObject(const char *name,
 static void Interpreter_dealloc(InterpreterObject *self)
 {
     PyThreadState *tstate = NULL;
-    PyThreadState *save_tstate = NULL;
     PyObject *exitfunc = NULL;
     PyObject *module = NULL;
 
-    /* XXX Needs to cater for GIL state. */
+    /*
+     * We should always enter here with the Python GIL held, but
+     * there will be no active thread state. Note that it should
+     * be safe to always assume that the simplified GIL state
+     * API lock was originally unlocked as always calling in
+     * from an Apache thread outside of Python.
+     */
 
-    save_tstate = PyThreadState_Swap(NULL);
+    PyEval_ReleaseLock();
 
-    tstate = PyThreadState_New(self->interp);
-    PyThreadState_Swap(tstate);
+    if (*self->name) {
+        tstate = PyThreadState_New(self->interp);
+        PyEval_AcquireThread(tstate);
+    }
+    else
+        PyGILState_Ensure();
 
     if (self->owner) {
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
@@ -2578,9 +2587,19 @@ static void Interpreter_dealloc(InterpreterObject *self)
     if (self->owner)
         Py_EndInterpreter(tstate);
 
-    free(self->name);
+    if (*self->name) {
+        tstate = PyThreadState_Get();
 
-    PyThreadState_Swap(save_tstate);
+        PyThreadState_Clear(tstate);
+        PyEval_ReleaseThread(tstate);
+        PyThreadState_Delete(tstate);
+    }
+    else
+        PyGILState_Release(PyGILState_UNLOCKED);
+
+    PyEval_AcquireLock();
+
+    free(self->name);
 
     PyObject_Del(self);
 }
