@@ -4585,7 +4585,7 @@ static int wsgi_setup_socket(WSGIDaemonEntry *daemon)
     }
 
     if (!geteuid()) {
-        if (chown(daemon->socket, daemon->uid, -1) < 0) {
+        if (chown(daemon->socket, unixd_config.user_id, -1) < 0) {
             ap_log_error(APLOG_MARK, APLOG_ERR, errno, daemon->server,
                          "mod_wsgi (pid=%d): Couldn't change owner of unix "
                          "domain socket '%s'.", getpid(), daemon->socket);
