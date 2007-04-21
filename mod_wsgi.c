@@ -123,6 +123,10 @@ module MODULE_VAR_EXPORT wsgi_module;
 module AP_MODULE_DECLARE_DATA wsgi_module;
 #endif
 
+/* Process information. */
+
+static pid_t wsgi_parent_pid = 0;
+
 /* Configuration objects. */
 
 typedef struct {
@@ -2213,29 +2217,39 @@ static InterpreterObject *newInterpreterObject(const char *name,
 
     /*
      * Install restricted objects for STDIN and STDOUT,
-     * or log object for STDOUT as appropriate.
+     * or log object for STDOUT as appropriate. Don't do
+     * this if not running on Win32 and we believe we
+     * are running in single process mode, otherwise
+     * it prevents use of interactive debuggers such as
+     * the 'pdb' module.
      */
 
-    object = (PyObject *)newLogObject(NULL);
-    PySys_SetObject("stderr", object);
-    Py_DECREF(object);
-
-    if (wsgi_server_config->restrict_stdout != 0) {
-        object = (PyObject *)newRestrictedObject("sys.stdout");
-        PySys_SetObject("stdout", object);
-        Py_DECREF(object);
-    }
-    else {
+#ifndef WIN32
+    if (wsgi_parent_pid != getpid()) {
+#endif
         object = (PyObject *)newLogObject(NULL);
-        PySys_SetObject("stdout", object);
+        PySys_SetObject("stderr", object);
         Py_DECREF(object);
-    }
 
-    if (wsgi_server_config->restrict_stdin != 0) {
-        object = (PyObject *)newRestrictedObject("sys.stdin");
-        PySys_SetObject("stdin", object);
-        Py_DECREF(object);
+        if (wsgi_server_config->restrict_stdout != 0) {
+            object = (PyObject *)newRestrictedObject("sys.stdout");
+            PySys_SetObject("stdout", object);
+            Py_DECREF(object);
+        }
+        else {
+            object = (PyObject *)newLogObject(NULL);
+            PySys_SetObject("stdout", object);
+            Py_DECREF(object);
+        }
+
+        if (wsgi_server_config->restrict_stdin != 0) {
+            object = (PyObject *)newRestrictedObject("sys.stdin");
+            PySys_SetObject("stdin", object);
+            Py_DECREF(object);
+        }
+#ifndef WIN32
     }
+#endif
 
     /*
      * Set sys.argv to one element list to fake out
@@ -4156,6 +4170,10 @@ void wsgi_hook_init(server_rec *s, apr_pool_t *p)
 
     ap_add_version_component(package);
 
+    /* Retain record of parent process ID. */
+
+    wsgi_parent_pid = getpid();
+
     /* Retain reference to main server config. */
 
     wsgi_server_config = ap_get_module_config(s->module_config, &wsgi_module);
@@ -4934,6 +4952,10 @@ static int wsgi_hook_init(apr_pool_t *pconf, apr_pool_t *ptemp,
             MOD_WSGI_MINORVERSION_NUMBER);
 
     ap_add_version_component(pconf, package);
+
+    /* Retain record of parent process ID. */
+
+    wsgi_parent_pid = getpid();
 
     /* Retain reference to main server config. */
 
