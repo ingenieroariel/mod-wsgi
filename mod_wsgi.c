@@ -2224,13 +2224,13 @@ static InterpreterObject *newInterpreterObject(const char *name,
      * the 'pdb' module.
      */
 
+    object = (PyObject *)newLogObject(NULL);
+    PySys_SetObject("stderr", object);
+    Py_DECREF(object);
+
 #ifndef WIN32
     if (wsgi_parent_pid != getpid()) {
 #endif
-        object = (PyObject *)newLogObject(NULL);
-        PySys_SetObject("stderr", object);
-        Py_DECREF(object);
-
         if (wsgi_server_config->restrict_stdout != 0) {
             object = (PyObject *)newRestrictedObject("sys.stdout");
             PySys_SetObject("stdout", object);
