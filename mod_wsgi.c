@@ -2584,20 +2584,21 @@ static void Interpreter_dealloc(InterpreterObject *self)
 
     /* If we own it, we destroy it. */
 
-    if (self->owner)
-        Py_EndInterpreter(tstate);
+    if (!self->owner) {
+        if (*self->name) {
+            tstate = PyThreadState_Get();
 
-    if (*self->name) {
-        tstate = PyThreadState_Get();
+            PyThreadState_Clear(tstate);
+            PyEval_ReleaseThread(tstate);
+            PyThreadState_Delete(tstate);
+        }
+        else
+            PyGILState_Release(PyGILState_UNLOCKED);
 
-        PyThreadState_Clear(tstate);
-        PyEval_ReleaseThread(tstate);
-        PyThreadState_Delete(tstate);
+        PyEval_AcquireLock();
     }
     else
-        PyGILState_Release(PyGILState_UNLOCKED);
-
-    PyEval_AcquireLock();
+        Py_EndInterpreter(tstate);
 
     free(self->name);
 
