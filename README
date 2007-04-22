@@ -7,12 +7,33 @@ Copyright 2007 GRAHAM DUMPLETON
 The mod_wsgi adapter is an Apache module that provides a WSGI compliant
 interface for hosting Python based web applications within Apache. The
 adapter is written completely in C code against the Apache C runtime and
-for hosting WSGI applications within Apache provides significantly better
-performance than using existing WSGI adapters for mod_python or CGI.
+for hosting WSGI applications within Apache has a lower overhead than using
+existing WSGI adapters for mod_python or CGI.
 
 The package can be compiled for and used with either Apache 1.3, 2.0 or
 2.2. Development and testing of mod_wsgi has been carried out with Python
-2.3.5, but is expected to be able to work with newer versions of Python.
+2.3.5, but is expected to be able to work with any version of Python 2.3
+or later versions of Python.
+
+Whatever version of Python is used, it must have been compiled with support
+for multithreading. To avoid a measure of memory bloat with your Apache
+processes, Python should also have been compiled with shared library
+support enabled. The majority of Python binary packages for Linux systems
+are not compiled with shared library support enabled. You should therefore
+consider recompiling Python from source code with shared library support
+enabled.
+
+If using a Python binary package for a Linux system, also ensure that the
+you have the corresponding 'dev' package installed for the Python package
+you have installed. Without this package you will be missing the Python
+header files and configuration files need to build mod_wsgi. You should
+also ensure you have the corresponding 'dev' package for the Apache web
+server package you are using.
+
+At this time only build scripts for UNIX systems are supplied. The code
+should still work on Windows, but still waiting for someone to volunteer
+to help develop and test some build scripts for Windows and ensure that
+mod_wsgi works on that platform.
 
 The source code in this package is made available under the terms of the
 Apache Licence, Version 2.0. See the "LICENCE" file for more information.
@@ -44,13 +65,12 @@ and use the resultant Apache module only with the version it was compiled
 for. Which ever version of Apache is used however, it must support dynamic
 loading of Apache modules.
 
-If using a prepackaged Python distribution, you must have the "dev"
-component of the package as well as the runtime component. If you have
-multiple versions of Python installed and you are not using that which is
-the default, you must organise that the PATH inherited by the Apache
-application when run will result in Apache finding the alternate version.
-If this is not done, the version of Python running within Apache may
-attempt to use the Python modules from the wrong version of Python.
+If you have multiple versions of Python installed and you are not using
+that which is the default, you may have to organise that the PATH inherited
+by the Apache application when run will result in Apache finding the
+alternate version. If this is not done, the version of Python running
+within Apache may attempt to use the Python modules from the wrong version
+of Python.
 
 Also note that the Apache module will be bound to the specific major/minor
 version of Python being used. If you ever upgrade to a newer version of
