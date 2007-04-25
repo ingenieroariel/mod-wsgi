@@ -30,7 +30,7 @@ install : all
 
 clean :
 	-rm -rf .libs
-	-rm -f mod_wsgi.o mod_wsgi.la mod_wsgi.lo mod_wsgi.slo
+	-rm -f mod_wsgi.o mod_wsgi.la mod_wsgi.lo mod_wsgi.slo mod_wsgi.loT
 	-rm -f config.log config.status
 	-rm -rf autom4te.cache
 
