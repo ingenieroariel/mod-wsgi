@@ -126,6 +126,8 @@ module AP_MODULE_DECLARE_DATA wsgi_module;
 /* Process information. */
 
 static pid_t wsgi_parent_pid = 0;
+static int wsgi_multiprocess = 1;
+static int wsgi_multithread = 1;
 
 /* Configuration objects. */
 
@@ -1717,11 +1719,6 @@ static PyObject *Adapter_environ(AdapterObject *self)
 
     int i = 0;
 
-    const char *location = NULL;
-
-    int multithread = 0;
-    int multiprocess = 0;
-
     const char *scheme = NULL;
 
     /* Create the WSGI environment dictionary. */
@@ -1753,24 +1750,11 @@ static PyObject *Adapter_environ(AdapterObject *self)
     PyDict_SetItemString(environ, "wsgi.version", object);
     Py_DECREF(object);
 
-#if AP_SERVER_MAJORVERSION_NUMBER >= 2
-    ap_mpm_query(AP_MPMQ_IS_THREADED, &multithread);
-    multithread = (multithread != AP_MPMQ_NOT_SUPPORTED);
-
-    ap_mpm_query(AP_MPMQ_IS_FORKED, &multiprocess);
-    if (multiprocess != AP_MPMQ_NOT_SUPPORTED) {
-        ap_mpm_query(AP_MPMQ_MAX_DAEMONS, &multiprocess);
-        multiprocess = (multiprocess != 1);
-    }
-#else
-    multiprocess = 1;
-#endif
-
-    object = PyBool_FromLong(multithread);
+    object = PyBool_FromLong(wsgi_multithread);
     PyDict_SetItemString(environ, "wsgi.multithread", object);
     Py_DECREF(object);
 
-    object = PyBool_FromLong(multiprocess);
+    object = PyBool_FromLong(wsgi_multiprocess);
     PyDict_SetItemString(environ, "wsgi.multiprocess", object);
     Py_DECREF(object);
 
@@ -4174,6 +4158,11 @@ void wsgi_hook_init(server_rec *s, apr_pool_t *p)
 
     wsgi_parent_pid = getpid();
 
+    /* Determine whether multiprocess and/or multithreaded. */
+
+    wsgi_multiprocess = 1;
+    wsgi_multithread = 0;
+
     /* Retain reference to main server config. */
 
     wsgi_server_config = ap_get_module_config(s->module_config, &wsgi_module);
@@ -4715,6 +4704,15 @@ static int wsgi_start_process(apr_pool_t *p, WSGIDaemonEntry *daemon)
         ap_close_listeners();
 
         /*
+	 * Flag whether multiple daemon processes or denoted
+	 * that requests could be spread across multiple daemon
+	 * process groups.
+         */
+
+        wsgi_multiprocess = daemon->multiprocess;
+        wsgi_multithread = 1;
+
+        /*
          * Create a pool for the child daemon process so
          * we can trigger various events off it at shutdown.
          */
@@ -5019,6 +5017,17 @@ static int wsgi_hook_init(apr_pool_t *pconf, apr_pool_t *ptemp,
     /* Retain record of parent process ID. */
 
     wsgi_parent_pid = getpid();
+
+    /* Determine whether multiprocess and/or multithread. */
+
+    ap_mpm_query(AP_MPMQ_IS_THREADED, &wsgi_multithread);
+    wsgi_multithread = (wsgi_multithread != AP_MPMQ_NOT_SUPPORTED);
+
+    ap_mpm_query(AP_MPMQ_IS_FORKED, &wsgi_multiprocess);
+    if (wsgi_multiprocess != AP_MPMQ_NOT_SUPPORTED) {
+        ap_mpm_query(AP_MPMQ_MAX_DAEMONS, &wsgi_multiprocess);
+        wsgi_multiprocess = (wsgi_multiprocess != 1);
+    }
 
     /* Retain reference to main server config. */
 
