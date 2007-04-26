@@ -4262,11 +4262,11 @@ static const command_rec wsgi_commands[] =
 
     { "WSGIPythonOptimize", wsgi_set_python_optimize, NULL,
         RSRC_CONF, TAKE1, "Enable/Disable Python compiler optimisations." },
+#ifndef WIN32
     { "WSGIPythonExecutable", wsgi_set_python_executable, NULL,
         RSRC_CONF, TAKE1, "Python executable absolute path name." },
     { "WSGIPythonHome", wsgi_set_python_home, NULL,
         RSRC_CONF, TAKE1, "Python prefix/exec_prefix absolute path names." },
-#ifndef WIN32
     { "WSGIPythonPath", wsgi_set_python_path, NULL,
         RSRC_CONF, TAKE1, "Python module search path." },
 #endif
@@ -5165,11 +5165,11 @@ static const command_rec wsgi_commands[] =
 
     AP_INIT_TAKE1("WSGIPythonOptimize", wsgi_set_python_optimize, NULL,
         RSRC_CONF, "Enable/Disable Python compiler optimisations."),
+#ifndef WIN32
     AP_INIT_TAKE1("WSGIPythonExecutable", wsgi_set_python_executable, NULL,
         RSRC_CONF, "Python executable absolute path name."),
     AP_INIT_TAKE1("WSGIPythonHome", wsgi_set_python_home, NULL,
         RSRC_CONF, "Python prefix/exec_prefix absolute path names."),
-#ifndef WIN32
     AP_INIT_TAKE1("WSGIPythonPath", wsgi_set_python_path, NULL,
         RSRC_CONF, "Python module search path."),
 #endif
