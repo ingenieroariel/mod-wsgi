@@ -981,6 +981,7 @@ static PyObject *Input_close(InputObject *self, PyObject *args)
 static PyObject *Input_read(InputObject *self, PyObject *args)
 {
     long size = -1;
+    int blocking = 1;
 
     PyObject *result = NULL;
     char *buffer = NULL;
@@ -1007,13 +1008,16 @@ static PyObject *Input_read(InputObject *self, PyObject *args)
         return PyString_FromString("");
 
     /*
-     * If size is not specified for the number of bytes
-     * to read in, default to reading in standard Apache
-     * block size.
+     * If size is not specified for the number of bytes to read
+     * in, default to reading in standard Apache block size.
+     * Denote that blocking until we accumulate data of
+     * specified size is disabled in this case.
      */
 
-    if (size < 0)
+    if (size < 0) {
         size = HUGE_STRING_LEN;
+        blocking = 0;
+    }
 
     /* Allocate string of the exact size required. */
 
@@ -1049,30 +1053,50 @@ static PyObject *Input_read(InputObject *self, PyObject *args)
     }
 
     /*
+     * If not required to block and we already have some data
+     * from residual buffer we can return immediately.
+     */
+
+    if (!blocking && length != 0) {
+        if (length != size) {
+            if (_PyString_Resize(&result, length))
+                return NULL;
+        }
+
+        return result;
+    }
+
+    /*
      * Read in remaining data required to achieve size. If
      * requested size of data wasn't able to be read in just
-     * return what was able to be read. Robust applications
-     * should keep reading until no data returned, not until
-     * the size of the data isn't what was requested.
+     * return what was able to be read if blocking not required.
      */
 
     if (length < size) {
-        Py_BEGIN_ALLOW_THREADS
-        n = ap_get_client_block(self->r, buffer + length, size - length);
-        Py_END_ALLOW_THREADS
+        while (length != size) {
+            Py_BEGIN_ALLOW_THREADS
+            n = ap_get_client_block(self->r, buffer + length, size - length);
+            Py_END_ALLOW_THREADS
 
-        if (n == -1) {
-            PyErr_SetString(PyExc_IOError, "request data read error");
-            Py_DECREF(result);
-            return NULL;
+            if (n == -1) {
+                PyErr_SetString(PyExc_IOError, "request data read error");
+                Py_DECREF(result);
+                return NULL;
+            }
+            else if (n == 0) {
+                /* Have exhausted all the available input data. */
+
+                self->done = 1;
+                break;
+            }
+
+            length += n;
+
+            /* Don't read more if not required to block. */
+
+            if (!blocking)
+                break;
         }
-        else if (n == 0) {
-            /* Have exhausted all the available input data. */
-
-            self->done = 1;
-        }
-
-        length += n;
 
         /*
          * Resize the final string. If the size reduction is
