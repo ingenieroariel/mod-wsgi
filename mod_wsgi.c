@@ -146,6 +146,10 @@ typedef struct {
     const char *socket_prefix;
 
     int python_optimize;
+    const char *python_executable;
+    const char *python_home;
+    const char *python_path;
+
     int restrict_stdin;
     int restrict_stdout;
     int restrict_signal;
@@ -183,6 +187,10 @@ static WSGIServerConfig *newWSGIServerConfig(apr_pool_t *p)
 #endif
 
     object->python_optimize = -1;
+    object->python_executable = NULL;
+    object->python_home = NULL;
+    object->python_path = NULL;
+
     object->restrict_stdin = -1;
     object->restrict_stdout = -1;
     object->restrict_signal = -1;
@@ -2753,12 +2761,25 @@ static void wsgi_python_init(apr_pool_t *p)
         const char *token = NULL;
         const char *version = NULL;
 
-        /* Check for optimisation flag. */
+        /* Check for Python paths and optimisation flag. */
 
         if (wsgi_server_config->python_optimize > 0)
             Py_OptimizeFlag = 2;
         else
             Py_OptimizeFlag = 0;
+
+        if (wsgi_server_config->python_executable)
+            Py_SetProgramName((char *)wsgi_server_config->python_executable);
+
+        if (wsgi_server_config->python_home)
+            Py_SetPythonHome((char *)wsgi_server_config->python_home);
+
+#ifndef WIN32
+        if (wsgi_server_config->python_path) {
+            putenv(apr_psprintf(p, "PYTHONPATH=%s",
+                                wsgi_server_config->python_path));
+        }
+#endif
 
         /* Initialise Python. */
 
@@ -3389,7 +3410,7 @@ static int wsgi_execute_script(request_rec *r)
 
         Py_XDECREF(result);
 
-        Py_DECREF(m);
+        Py_XDECREF(m);
     }
 
     Py_XDECREF(module);
@@ -3597,6 +3618,54 @@ static const char *wsgi_set_python_optimize(cmd_parms *cmd, void *mconfig,
 
     sconfig = ap_get_module_config(cmd->server->module_config, &wsgi_module);
     sconfig->python_optimize = !strcasecmp(f, "On");
+
+    return NULL;
+}
+
+static const char *wsgi_set_python_executable(cmd_parms *cmd, void *mconfig,
+                                              const char *f)
+{
+    const char *error = NULL;
+    WSGIServerConfig *sconfig = NULL;
+
+    error = ap_check_cmd_context(cmd, GLOBAL_ONLY);
+    if (error != NULL)
+        return error;
+
+    sconfig = ap_get_module_config(cmd->server->module_config, &wsgi_module);
+    sconfig->python_executable = f;
+
+    return NULL;
+}
+
+static const char *wsgi_set_python_home(cmd_parms *cmd, void *mconfig,
+                                        const char *f)
+{
+    const char *error = NULL;
+    WSGIServerConfig *sconfig = NULL;
+
+    error = ap_check_cmd_context(cmd, GLOBAL_ONLY);
+    if (error != NULL)
+        return error;
+
+    sconfig = ap_get_module_config(cmd->server->module_config, &wsgi_module);
+    sconfig->python_home = f;
+
+    return NULL;
+}
+
+static const char *wsgi_set_python_path(cmd_parms *cmd, void *mconfig,
+                                        const char *f)
+{
+    const char *error = NULL;
+    WSGIServerConfig *sconfig = NULL;
+
+    error = ap_check_cmd_context(cmd, GLOBAL_ONLY);
+    if (error != NULL)
+        return error;
+
+    sconfig = ap_get_module_config(cmd->server->module_config, &wsgi_module);
+    sconfig->python_path = f;
 
     return NULL;
 }
@@ -4169,7 +4238,7 @@ void wsgi_hook_init(server_rec *s, apr_pool_t *p)
 
     /* Initialise Python if not already done. */
 
-    wsgi_python_init(NULL);
+    wsgi_python_init(p);
 }
 
 static void wsgi_hook_child_init(server_rec *s, apr_pool_t *p)
@@ -4193,6 +4262,15 @@ static const command_rec wsgi_commands[] =
 
     { "WSGIPythonOptimize", wsgi_set_python_optimize, NULL,
         RSRC_CONF, TAKE1, "Enable/Disable Python compiler optimisations." },
+    { "WSGIPythonExecutable", wsgi_set_python_executable, NULL,
+        RSRC_CONF, TAKE1, "Python executable absolute path name." },
+    { "WSGIPythonHome", wsgi_set_python_home, NULL,
+        RSRC_CONF, TAKE1, "Python prefix/exec_prefix absolute path names." },
+#ifndef WIN32
+    { "WSGIPythonPath", wsgi_set_python_path, NULL,
+        RSRC_CONF, TAKE1, "Python module search path." },
+#endif
+
     { "WSGIRestrictStdin", wsgi_set_restrict_stdin, NULL,
         RSRC_CONF, TAKE1, "Enable/Disable restrictions on use of STDIN." },
     { "WSGIRestrictStdout", wsgi_set_restrict_stdout, NULL,
@@ -5087,6 +5165,15 @@ static const command_rec wsgi_commands[] =
 
     AP_INIT_TAKE1("WSGIPythonOptimize", wsgi_set_python_optimize, NULL,
         RSRC_CONF, "Enable/Disable Python compiler optimisations."),
+    AP_INIT_TAKE1("WSGIPythonExecutable", wsgi_set_python_executable, NULL,
+        RSRC_CONF, "Python executable absolute path name."),
+    AP_INIT_TAKE1("WSGIPythonHome", wsgi_set_python_home, NULL,
+        RSRC_CONF, "Python prefix/exec_prefix absolute path names."),
+#ifndef WIN32
+    AP_INIT_TAKE1("WSGIPythonPath", wsgi_set_python_path, NULL,
+        RSRC_CONF, "Python module search path."),
+#endif
+
     AP_INIT_TAKE1("WSGIRestrictStdin", wsgi_set_restrict_stdin, NULL,
         RSRC_CONF, "Enable/Disable restrictions on use of STDIN."),
     AP_INIT_TAKE1("WSGIRestrictStdout", wsgi_set_restrict_stdout, NULL,
