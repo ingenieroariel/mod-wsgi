@@ -4303,12 +4303,12 @@ static const command_rec wsgi_commands[] =
         RSRC_CONF, TAKE1, "Enable/Disable restrictions on use of signal()." },
 
     { "WSGIApplicationGroup", wsgi_set_application_group, NULL,
-        OR_FILEINFO, TAKE1, "Name of the WSGI application group to use." },
+        ACCESS_CONF|RSRC_CONF, TAKE1, "Name of WSGI application group." },
     { "WSGICallableObject", wsgi_set_callable_object, NULL,
         OR_FILEINFO, TAKE1, "Name of entry point in WSGI script file." },
 
     { "WSGIPassAuthorization", wsgi_set_pass_authorization, NULL,
-        OR_FILEINFO, TAKE1, "Enable/Disable passing authorization headers." },
+        ACCESS_CONF|RSRC_CONF, TAKE1, "Enable/Disable WSGI authorization." },
     { "WSGIScriptReloading", wsgi_set_script_reloading, NULL,
         OR_FILEINFO, TAKE1, "Enable/Disable script reloading mechanism." },
     { "WSGIReloadMechanism", wsgi_set_reload_mechanism, NULL,
@@ -5207,16 +5207,16 @@ static const command_rec wsgi_commands[] =
 
 #if !defined(WIN32)
     AP_INIT_TAKE1("WSGIDaemonProcess", wsgi_set_daemon_process, NULL,
-        OR_FILEINFO, "Name of the WSGI daemon process to use."),
+        ACCESS_CONF|RSRC_CONF, "Name of the WSGI daemon process."),
 #endif
 
     AP_INIT_TAKE1("WSGIApplicationGroup", wsgi_set_application_group, NULL,
-        OR_FILEINFO, "Name of the WSGI application group to use."),
+        ACCESS_CONF|RSRC_CONF, "Name of WSGI application group."),
     AP_INIT_TAKE1("WSGICallableObject", wsgi_set_callable_object, NULL,
         OR_FILEINFO, "Name of entry point in WSGI script file."),
 
     AP_INIT_TAKE1("WSGIPassAuthorization", wsgi_set_pass_authorization, NULL,
-        OR_FILEINFO, "Enable/Disable passing authorization headers."),
+        ACCESS_CONF|RSRC_CONF, "Enable/Disable WSGI authorization."),
     AP_INIT_TAKE1("WSGIScriptReloading", wsgi_set_script_reloading, NULL,
         OR_FILEINFO, "Enable/Disable script reloading mechanism."),
     AP_INIT_TAKE1("WSGIReloadMechanism", wsgi_set_reload_mechanism, NULL,
