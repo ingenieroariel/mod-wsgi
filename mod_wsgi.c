@@ -5094,9 +5094,11 @@ static int wsgi_hook_init(apr_pool_t *pconf, apr_pool_t *ptemp,
      * as inheriting a preinitialized Python interpreter.
      */
 
+#if 0
 #if defined(WIN32)
     if (!getenv("AP_PARENT_PID"))
         return OK;
+#endif
 #endif
 
     /*
