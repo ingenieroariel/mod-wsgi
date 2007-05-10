@@ -1912,18 +1912,20 @@ static int Adapter_run(AdapterObject *self, PyObject *object)
             Py_DECREF(iterator);
         }
 
-        if (PyObject_HasAttrString(self->sequence, "close")) {
-            PyObject *args = NULL;
-            PyObject *data = NULL;
+        if (!PyErr_Occurred()) {
+            if (PyObject_HasAttrString(self->sequence, "close")) {
+                PyObject *args = NULL;
+                PyObject *data = NULL;
 
-            close = PyObject_GetAttrString(self->sequence, "close");
+                close = PyObject_GetAttrString(self->sequence, "close");
 
-            args = Py_BuildValue("()");
-            data = PyEval_CallObject(close, args);
+                args = Py_BuildValue("()");
+                data = PyEval_CallObject(close, args);
 
-            Py_DECREF(args);
-            Py_XDECREF(data);
-            Py_DECREF(close);
+                Py_DECREF(args);
+                Py_XDECREF(data);
+                Py_DECREF(close);
+            }
         }
 
         Py_DECREF(self->sequence);
