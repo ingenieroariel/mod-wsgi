@@ -653,9 +653,110 @@ static WSGIRequestConfig *wsgi_create_req_config(apr_pool_t *p, request_rec *r)
     return config;
 }
 
-/*
- * Class objects used by response handler.
- */
+/* Error reporting. */
+
+void wsgi_log_python_error(request_rec *r, PyObject *log)
+{
+    if (!PyErr_Occurred())
+        return;
+
+    PyObject *m = NULL;
+    PyObject *result = NULL;
+
+    PyObject *type = NULL;
+    PyObject *value = NULL;
+    PyObject *traceback = NULL;
+
+    if (PyErr_ExceptionMatches(PyExc_SystemExit)) {
+#if AP_SERVER_MAJORVERSION_NUMBER < 2
+        ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE,
+                     r, "mod_wsgi (pid=%d): SystemExit "
+                     "exception raised by WSGI script "
+                     "'%s' ignored.", getpid(), r->filename);
+#else
+        ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE,
+                     0, r, "mod_wsgi (pid=%d): SystemExit "
+                     "exception raised by WSGI script "
+                     "'%s' ignored.", getpid(), r->filename);
+#endif
+    }
+    else {
+#if AP_SERVER_MAJORVERSION_NUMBER < 2
+        ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE,
+                     r, "mod_wsgi (pid=%d): Exception "
+                     "occurred within WSGI script '%s'.",
+                     getpid(), r->filename);
+#else
+        ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE,
+                     0, r, "mod_wsgi (pid=%d): Exception "
+                     "occurred within WSGI script '%s'.",
+                     getpid(), r->filename);
+#endif
+    }
+
+    PyErr_Fetch(&type, &value, &traceback);
+
+    if (!value) {
+        value = Py_None;
+        Py_INCREF(value);
+    }
+
+    if (!traceback) {
+        traceback = Py_None;
+        Py_INCREF(traceback);
+    }
+
+    m = PyImport_ImportModule("traceback");
+
+    if (m) {
+        PyObject *d = NULL;
+        PyObject *o = NULL;
+        d = PyModule_GetDict(m);
+        o = PyDict_GetItemString(d, "print_exception");
+        if (o) {
+            PyObject *args = NULL;
+            Py_INCREF(o);
+            args = Py_BuildValue("(OOOOO)", type, value, traceback,
+                                 Py_None, log);
+            result = PyEval_CallObject(o, args);
+            Py_DECREF(args);
+        }
+        Py_DECREF(o);
+    }
+
+    if (!result) {
+        /*
+         * If can't output exception and traceback then
+         * use PyErr_Print to dump out details of the
+         * exception. For SystemExit though if we do
+         * that the process will actually be terminated
+         * so can only clear the exception information
+         * and keep going.
+         */
+
+        PyErr_Restore(type, value, traceback);
+
+        if (!PyErr_ExceptionMatches(PyExc_SystemExit)) {
+            PyErr_Print();
+            if (Py_FlushLine())
+                PyErr_Clear();
+        }
+        else {
+            PyErr_Clear();
+        }
+    }
+    else {
+        Py_XDECREF(type);
+        Py_XDECREF(value);
+        Py_XDECREF(traceback);
+    }
+
+    Py_XDECREF(result);
+
+    Py_XDECREF(m);
+}
+
+/* Class objects used by response handler. */
 
 typedef struct {
         PyObject_HEAD
@@ -1565,12 +1666,12 @@ typedef struct {
         int status;
         PyObject *headers;
         PyObject *sequence;
-        LogObject *log;
+        PyObject *log;
 } AdapterObject;
 
 static PyTypeObject Adapter_Type;
 
-static AdapterObject *newAdapterObject(request_rec *r, LogObject *log)
+static AdapterObject *newAdapterObject(request_rec *r, PyObject *log)
 {
     AdapterObject *self;
 
@@ -1825,7 +1926,7 @@ static PyObject *Adapter_environ(AdapterObject *self)
      * reference to log object as keep reference to it.
      */
 
-    object = (PyObject *)self->log;
+    object = self->log;
     PyDict_SetItemString(environ, "wsgi.errors", object);
 
     /* Setup input object for request content. */
@@ -1912,21 +2013,25 @@ static int Adapter_run(AdapterObject *self, PyObject *object)
             Py_DECREF(iterator);
         }
 
-        if (!PyErr_Occurred()) {
-            if (PyObject_HasAttrString(self->sequence, "close")) {
-                PyObject *args = NULL;
-                PyObject *data = NULL;
+        if (PyErr_Occurred())
+            wsgi_log_python_error(self->r, self->log);
 
-                close = PyObject_GetAttrString(self->sequence, "close");
+        if (PyObject_HasAttrString(self->sequence, "close")) {
+            PyObject *args = NULL;
+            PyObject *data = NULL;
 
-                args = Py_BuildValue("()");
-                data = PyEval_CallObject(close, args);
+            close = PyObject_GetAttrString(self->sequence, "close");
 
-                Py_DECREF(args);
-                Py_XDECREF(data);
-                Py_DECREF(close);
-            }
+            args = Py_BuildValue("()");
+            data = PyEval_CallObject(close, args);
+
+            Py_DECREF(args);
+            Py_XDECREF(data);
+            Py_DECREF(close);
         }
+
+        if (PyErr_Occurred())
+            wsgi_log_python_error(self->r, self->log);
 
         Py_DECREF(self->sequence);
 
@@ -1936,6 +2041,9 @@ static int Adapter_run(AdapterObject *self, PyObject *object)
     Py_DECREF(args);
     Py_DECREF(start);
     Py_DECREF(environ);
+
+    if (PyErr_Occurred())
+        wsgi_log_python_error(self->r, self->log);
 
     return result;
 }
@@ -3140,7 +3248,7 @@ static int wsgi_execute_script(request_rec *r)
     InterpreterObject *interp = NULL;
     PyObject *modules = NULL;
     PyObject *module = NULL;
-    LogObject *log = NULL;
+    PyObject *log = NULL;
     char *name = NULL;
     int found = 0;
 
@@ -3305,7 +3413,7 @@ static int wsgi_execute_script(request_rec *r)
      * module or run the script.
      */
 
-    log = newLogObject(r);
+    log = (PyObject *)newLogObject(r);
 
     /* Determine if script is executable and execute it. */
 
@@ -3361,105 +3469,12 @@ static int wsgi_execute_script(request_rec *r)
 
     /* Log any details of exceptions if execution failed. */
 
-    if (PyErr_Occurred()) {
-        PyObject *m = NULL;
-        PyObject *result = NULL;
+    if (PyErr_Occurred())
+        wsgi_log_python_error(r, log);
 
-        PyObject *type = NULL;
-        PyObject *value = NULL;
-        PyObject *traceback = NULL;
-
-        if (PyErr_ExceptionMatches(PyExc_SystemExit)) {
-#if AP_SERVER_MAJORVERSION_NUMBER < 2
-            ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE,
-                         r, "mod_wsgi (pid=%d): SystemExit "
-                         "exception raised by WSGI script "
-                         "'%s' ignored.", getpid(), r->filename);
-#else
-            ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE,
-                         0, r, "mod_wsgi (pid=%d): SystemExit "
-                         "exception raised by WSGI script "
-                         "'%s' ignored.", getpid(), r->filename);
-#endif
-        }
-        else {
-#if AP_SERVER_MAJORVERSION_NUMBER < 2
-            ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE,
-                         r, "mod_wsgi (pid=%d): Exception "
-                         "occurred within WSGI script '%s'.",
-                         getpid(), r->filename);
-#else
-            ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE,
-                         0, r, "mod_wsgi (pid=%d): Exception "
-                         "occurred within WSGI script '%s'.",
-                         getpid(), r->filename);
-#endif
-        }
-
-        PyErr_Fetch(&type, &value, &traceback);
-
-        if (!value) {
-            value = Py_None;
-            Py_INCREF(value);
-        }
-
-        if (!traceback) {
-            traceback = Py_None;
-            Py_INCREF(traceback);
-        }
-
-        m = PyImport_ImportModule("traceback");
-
-        if (m) {
-            PyObject *d = NULL;
-            PyObject *o = NULL;
-            d = PyModule_GetDict(m);
-            o = PyDict_GetItemString(d, "print_exception");
-            if (o) {
-                PyObject *args = NULL;
-                Py_INCREF(o);
-                args = Py_BuildValue("(OOOOO)", type, value, traceback,
-                                     Py_None, log);
-                result = PyEval_CallObject(o, args);
-                Py_DECREF(args);
-            }
-            Py_DECREF(o);
-        }
-
-        if (!result) {
-            /*
-             * If can't output exception and traceback then
-             * use PyErr_Print to dump out details of the
-             * exception. For SystemExit though if we do
-             * that the process will actually be terminated
-             * so can only clear the exception information
-             * and keep going.
-             */
-
-            PyErr_Restore(type, value, traceback);
-
-            if (!PyErr_ExceptionMatches(PyExc_SystemExit)) {
-                PyErr_Print();
-                if (Py_FlushLine())
-                    PyErr_Clear();
-            }
-            else {
-                PyErr_Clear();
-            }
-        }
-        else {
-            Py_XDECREF(type);
-            Py_XDECREF(value);
-            Py_XDECREF(traceback);
-        }
-
-        Py_XDECREF(result);
-
-        Py_XDECREF(m);
-    }
+    /* Cleanup and release interpreter, */
 
     Py_XDECREF(module);
-
     Py_DECREF(log);
 
     wsgi_release_interpreter(interp);
