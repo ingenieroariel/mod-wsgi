@@ -3075,8 +3075,10 @@ static PyObject *wsgi_load_source(request_rec *r, const char *name, int found)
     co = (PyObject *)PyNode_Compile(n, r->filename);
     PyNode_Free(n);
 
-    m = PyImport_ExecCodeModuleEx((char *)name, co, r->filename);
-    Py_DECREF(co);
+    if (co)
+        m = PyImport_ExecCodeModuleEx((char *)name, co, r->filename);
+
+    Py_XDECREF(co);
 
     if (m) {
         PyObject *object = NULL;
