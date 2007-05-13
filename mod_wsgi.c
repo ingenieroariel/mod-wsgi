@@ -4398,6 +4398,7 @@ module MODULE_VAR_EXPORT wsgi_module = {
 #include "scoreboard.h"
 #include "mpm_common.h"
 #include "apr_proc_mutex.h"
+#include "http_connection.h"
 
 #if APR_HAVE_SYS_SOCKET_H
 #include <sys/socket.h>
@@ -4433,7 +4434,7 @@ typedef struct {
     int processes;
     int multiprocess;
     const char *socket;
-    int fd;
+    int listener_fd;
     const char* mutex_path;
     apr_proc_mutex_t* mutex;
 } WSGIProcessGroup;
@@ -4442,6 +4443,7 @@ typedef struct {
     WSGIProcessGroup *group;
     int instance;
     apr_proc_t process;
+    apr_socket_t *listener;
 } WSGIDaemonProcess;
 
 typedef struct {
@@ -4666,7 +4668,7 @@ static void wsgi_manage_process(int reason, void *data, apr_wait_t status)
              */
 
             if (daemon->instance == 1) {
-                if (close(daemon->group->fd) < 0) {
+                if (close(daemon->group->listener_fd) < 0) {
                     ap_log_error(APLOG_MARK, APLOG_ERR, errno,
                                  daemon->group->server, "mod_wsgi (pid=%d): "
                                  "Couldn't close unix domain socket '%s'.",
@@ -4800,10 +4802,76 @@ static int wsgi_setup_socket(WSGIProcessGroup *process)
     return sockfd;
 }
 
-static void wsgi_daemon_main(WSGIDaemonProcess *daemon)
+static void wsgi_process_socket(apr_pool_t *p, apr_socket_t *sock,
+                                apr_bucket_alloc_t *bucket_alloc,
+                                WSGIDaemonProcess *daemon)
 {
-    while (!wsgi_daemon_shutdown)
-        sleep(1);
+    conn_rec *current_conn;
+    ap_sb_handle_t *sbh;
+
+    ap_create_sb_handle(&sbh, p, -1, 0);
+
+    current_conn = ap_run_create_connection(p, daemon->group->server, sock,
+                                            1, sbh, bucket_alloc);
+    if (current_conn) {
+        ap_process_connection(current_conn, sock);
+        ap_lingering_close(current_conn);
+    }
+}
+
+static void wsgi_daemon_main(apr_pool_t *p, WSGIDaemonProcess *daemon)
+{
+    apr_status_t status;
+    apr_socket_t *socket;
+
+    apr_pool_t *ptrans;
+    apr_bucket_alloc_t *bucket_alloc;
+
+    /* Create socket wrapper for listener file descriptor. */
+
+    apr_os_sock_put(&daemon->listener, &daemon->group->listener_fd, p);
+
+    /* Loop until signal received to shutdown daemon process. */
+
+    while (!wsgi_daemon_shutdown) {
+        if (daemon->group->mutex) {
+            if (apr_proc_mutex_unlock(daemon->group->mutex) != APR_SUCCESS) {
+                ap_log_error(APLOG_MARK, APLOG_ERR, 0, daemon->group->server,
+                             "mod_wsgi (pid=%d): Couldn't acquire accept "
+                             "mutex '%s'.", getpid(), daemon->group->socket);
+
+                /* Don't die immediately to avoid a fork bomb. */
+
+                sleep(20);
+
+                return;
+            }
+        }
+
+        status = apr_socket_accept(&socket, daemon->listener, p);
+
+        if (daemon->group->mutex) {
+            if (apr_proc_mutex_unlock(daemon->group->mutex) != APR_SUCCESS) {
+                ap_log_error(APLOG_MARK, APLOG_ERR, 0, daemon->group->server,
+                             "mod_wsgi (pid=%d): Couldn't release accept "
+                             "mutex '%s'.", getpid(), daemon->group->socket);
+
+                return;
+            }
+        }
+
+        if (status != APR_SUCCESS) {
+            if (APR_STATUS_IS_EINTR(status))
+                continue;
+        }
+
+        apr_pool_create(&ptrans, p);
+        bucket_alloc = apr_bucket_alloc_create(ptrans);
+
+        wsgi_process_socket(p, socket, bucket_alloc, daemon);
+
+        apr_pool_destroy(ptrans);
+    }
 }
 
 static int wsgi_start_process(apr_pool_t *p, WSGIDaemonProcess *daemon)
@@ -4825,9 +4893,9 @@ static int wsgi_start_process(apr_pool_t *p, WSGIDaemonProcess *daemon)
 
 #ifdef HAVE_BINDPROCESSOR
         /*
-	 * By default, AIX binds to a single processor.  This
-	 * bit unbinds children which will then bind to another
-	 * CPU.
+         * By default, AIX binds to a single processor.  This
+         * bit unbinds children which will then bind to another
+         * CPU.
          */
 
         status = bindprocessor(BINDPROCESS, (int)getpid(),
@@ -4855,8 +4923,9 @@ static int wsgi_start_process(apr_pool_t *p, WSGIDaemonProcess *daemon)
                              "mutex in daemon process '%s'.",
                              getpid(), daemon->group->mutex_path);
 
-                while (!wsgi_daemon_shutdown)
-                    sleep(1);
+                /* Don't die immediately to avoid a fork bomb. */
+
+                sleep(20);
 
                 exit(-1);
             }
@@ -4881,9 +4950,9 @@ static int wsgi_start_process(apr_pool_t *p, WSGIDaemonProcess *daemon)
         apr_signal(SIGTERM, wsgi_signal_handler);
 
         /*
-	 * Flag whether multiple daemon processes or denoted
-	 * that requests could be spread across multiple daemon
-	 * process groups.
+         * Flag whether multiple daemon processes or denoted
+         * that requests could be spread across multiple daemon
+         * process groups.
          */
 
         wsgi_multiprocess = daemon->group->multiprocess;
@@ -4911,7 +4980,7 @@ static int wsgi_start_process(apr_pool_t *p, WSGIDaemonProcess *daemon)
 
         /* Run the main routine for the daemon process. */
 
-        wsgi_daemon_main(daemon);
+        wsgi_daemon_main(p, daemon);
 
         /*
          * Destroy the pool for the daemon process. This will
@@ -4986,16 +5055,16 @@ static int wsgi_start_daemons(apr_pool_t *p)
 
         apr_table_setn(wsgi_daemon_sockets, entry->name, entry->socket);
 
-        entry->fd = wsgi_setup_socket(entry);
+        entry->listener_fd = wsgi_setup_socket(entry);
 
-        if (entry->fd == -1)
+        if (entry->listener_fd == -1)
             return DECLINED;
 
         /*
-	 * If there is more than one daemon process in the group
-	 * then need to create an accept mutex for the daemon
-	 * processes to use so they don't interfere with each
-	 * other.
+         * If there is more than one daemon process in the group
+         * then need to create an accept mutex for the daemon
+         * processes to use so they don't interfere with each
+         * other.
          */
 
         if (entry->processes > 1) {
@@ -5015,9 +5084,9 @@ static int wsgi_start_daemons(apr_pool_t *p)
             }
 
             /*
-	     * Depending on the locking mechanism being used
-	     * need to change the permissions of the lock. Can't
-	     * use unixd_set_proc_mutex_perms() as it uses the
+             * Depending on the locking mechanism being used
+             * need to change the permissions of the lock. Can't
+             * use unixd_set_proc_mutex_perms() as it uses the
              * default Apache child process uid/gid where the
              * daemon process uid/gid can be different.
              */
@@ -5198,6 +5267,31 @@ static int wsgi_execute_remote(request_rec *r)
     return HTTP_INTERNAL_SERVER_ERROR;
 }
 
+static int wsgi_hook_daemon_connect(conn_rec *c)
+{
+    /* Don't do anything if not in daemon process. */
+
+    if (!wsgi_daemon_pool)
+        return DECLINED;
+
+    ap_log_error(APLOG_MARK, APLOG_ERR, 0, 0, "mod_wsgi (pid=%d): "
+                 "wsgi_hook_daemon_connect()", getpid());
+
+    return DONE;
+}
+
+static int wsgi_hook_daemon_handler(request_rec *r, int lookup_uri)
+{
+    /* Don't do anything if not in daemon process. */
+
+    if (!wsgi_daemon_pool)
+        return DECLINED;
+
+    /* Execute the target WSGI application. */
+
+    return wsgi_execute_script(r);
+}
+
 #endif
 
 /*
@@ -5302,6 +5396,13 @@ static void wsgi_register_hooks(apr_pool_t *p)
 
     ap_hook_translate_name(wsgi_hook_intercept, prev, next, APR_HOOK_MIDDLE);
     ap_hook_handler(wsgi_hook_handler, NULL, NULL, APR_HOOK_MIDDLE);
+
+#if defined(MOD_WSGI_WITH_DAEMONS)
+    ap_hook_process_connection(wsgi_hook_daemon_connect, NULL, NULL,
+                               APR_HOOK_REALLY_FIRST);
+    ap_hook_quick_handler(wsgi_hook_daemon_handler, NULL, NULL,
+                               APR_HOOK_REALLY_FIRST);
+#endif
 }
 
 static const command_rec wsgi_commands[] =
