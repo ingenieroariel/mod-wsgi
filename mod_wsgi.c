@@ -4396,6 +4396,8 @@ module MODULE_VAR_EXPORT wsgi_module = {
 
 #include "unixd.h"
 #include "scoreboard.h"
+#include "mpm_common.h"
+#include "apr_proc_mutex.h"
 
 #if APR_HAVE_SYS_SOCKET_H
 #include <sys/socket.h>
@@ -4405,6 +4407,9 @@ module MODULE_VAR_EXPORT wsgi_module = {
 #endif
 #if APR_HAVE_SYS_TYPES_H
 #include <sys/types.h>
+#endif
+#ifdef HAVE_SYS_SEM_H
+#include <sys/sem.h>
 #endif
 
 #include <sys/un.h>
@@ -4429,6 +4434,8 @@ typedef struct {
     int multiprocess;
     const char *socket;
     int fd;
+    const char* mutex_path;
+    apr_proc_mutex_t* mutex;
 } WSGIProcessGroup;
 
 typedef struct {
@@ -4867,6 +4874,25 @@ static int wsgi_start_process(apr_pool_t *p, WSGIDaemonProcess *daemon)
 
         wsgi_setup_access(daemon);
 
+        /* Reinitialise accept mutex in daemon process. */
+
+        if (daemon->group->mutex) {
+            status = apr_proc_mutex_child_init(&daemon->group->mutex,
+                                               daemon->group->mutex_path, p);
+
+            if (status != APR_SUCCESS) {
+                ap_log_error(APLOG_MARK, APLOG_EMERG, 0, daemon->group->server,
+                             "mod_wsgi (pid=%d): Couldn't intialise accept "
+                             "mutex in daemon process '%s'.",
+                             getpid(), daemon->group->mutex_path);
+
+                while (!wsgi_daemon_shutdown)
+                    sleep(1);
+
+                exit(-1);
+            }
+        }
+
         /* Run the main routine for the daemon process. */
 
         wsgi_daemon_main(daemon);
@@ -4933,13 +4959,96 @@ static int wsgi_start_daemons(apr_pool_t *p)
 
         entry = &entries[i];
 
-        entry->socket = apr_psprintf(p, "%s.%d.%d.skt",
+        /*
+         * Calculate path for socket to accept requests on and
+         * create the socket.
+         */
+
+        entry->socket = apr_psprintf(p, "%s.%d.%d.sock",
                                      wsgi_server_config->socket_prefix,
                                      ap_my_generation, entry->id);
 
         apr_table_setn(wsgi_daemon_sockets, entry->name, entry->socket);
 
         entry->fd = wsgi_setup_socket(entry);
+
+        if (entry->fd == -1)
+            return DECLINED;
+
+        /*
+	 * If there is more than one daemon process in the group
+	 * then need to create an accept mutex for the daemon
+	 * processes to use so they don't interfere with each
+	 * other.
+         */
+
+        if (entry->processes > 1) {
+            entry->mutex_path = apr_psprintf(p, "%s.%d.%d.lock",
+                                             wsgi_server_config->socket_prefix,
+                                             ap_my_generation, entry->id);
+
+            status = apr_proc_mutex_create(&entry->mutex, entry->mutex_path,
+                                           ap_accept_lock_mech, p);
+
+            if (status != APR_SUCCESS) {
+                ap_log_error(APLOG_MARK, APLOG_ERR, errno,
+                             entry->server, "mod_wsgi (pid=%d): "
+                             "Couldn't create accept lock '%s' (%d).",
+                             getpid(), entry->mutex_path, ap_accept_lock_mech);
+                return DECLINED;
+            }
+
+            /*
+	     * Depending on the locking mechanism being used
+	     * need to change the permissions of the lock. Can't
+	     * use unixd_set_proc_mutex_perms() as it uses the
+             * default Apache child process uid/gid where the
+             * daemon process uid/gid can be different.
+             */
+
+#if APR_HAS_SYSVSEM_SERIALIZE
+            if (!strcmp(apr_proc_mutex_name(entry->mutex), "sysvsem")) {
+                apr_os_proc_mutex_t ospmutex;
+#if !APR_HAVE_UNION_SEMUN
+                union semun { 
+                    long val;
+                    struct semid_ds *buf;
+                    unsigned short *array;
+                };
+#endif  
+                union semun ick;
+                struct semid_ds buf;
+                
+                apr_os_proc_mutex_get(&ospmutex, entry->mutex);
+                buf.sem_perm.uid = entry->uid;
+                buf.sem_perm.gid = entry->gid;
+                buf.sem_perm.mode = 0600;
+                ick.buf = &buf;
+                if (semctl(ospmutex.crossproc, 0, IPC_SET, ick) < 0) {
+                    ap_log_error(APLOG_MARK, APLOG_ERR, errno,
+                                 entry->server, "mod_wsgi (pid=%d): "
+                                 "Couldn't set permissions on accept mutex "
+                                 "'%s' (sysvsem).", getpid(),
+                                 entry->mutex_path);
+                    return DECLINED;
+                }
+            }
+#endif
+#if APR_HAS_FLOCK_SERIALIZE
+            if (!strcmp(apr_proc_mutex_name(entry->mutex), "flock")) {
+                if (chown(entry->mutex_path, entry->uid, -1) < 0) {
+                    ap_log_error(APLOG_MARK, APLOG_ERR, errno,
+                                 entry->server, "mod_wsgi (pid=%d): "
+                                 "Couldn't set permissions on accept mutex "
+                                 "'%s' (flock).", getpid(),
+                                 entry->mutex_path);
+                    return DECLINED;
+                }
+            }
+#endif
+        }
+
+        /* Create the actual required daemon processes. */
 
         for (j = 1; j <= entry->processes; j++) {
             process = (WSGIDaemonProcess *)apr_pcalloc(p, sizeof(
