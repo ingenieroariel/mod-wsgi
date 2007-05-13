@@ -4823,6 +4823,45 @@ static int wsgi_start_process(apr_pool_t *p, WSGIDaemonProcess *daemon)
                      getpid(), daemon->group->name, (long)daemon->group->uid,
                      (unsigned)daemon->group->gid);
 
+#ifdef HAVE_BINDPROCESSOR
+        /*
+	 * By default, AIX binds to a single processor.  This
+	 * bit unbinds children which will then bind to another
+	 * CPU.
+         */
+
+        status = bindprocessor(BINDPROCESS, (int)getpid(),
+                               PROCESSOR_CLASS_ANY);
+        if (status != OK) {
+            ap_log_error(APLOG_MARK, APLOG_NOTICE, errno,
+                         daemon->group->server, "mod_wsgi (pid=%d): "
+                         "Failed to unbind processor.", getpid());
+        }
+#endif
+
+        /* Setup daemon process user/group access. */
+
+        wsgi_setup_access(daemon);
+
+        /* Reinitialise accept mutex in daemon process. */
+
+        if (daemon->group->mutex) {
+            status = apr_proc_mutex_child_init(&daemon->group->mutex,
+                                               daemon->group->mutex_path, p);
+
+            if (status != APR_SUCCESS) {
+                ap_log_error(APLOG_MARK, APLOG_EMERG, 0, daemon->group->server,
+                             "mod_wsgi (pid=%d): Couldn't intialise accept "
+                             "mutex in daemon process '%s'.",
+                             getpid(), daemon->group->mutex_path);
+
+                while (!wsgi_daemon_shutdown)
+                    sleep(1);
+
+                exit(-1);
+            }
+        }
+
         /*
          * Close child copy of the listening sockets for the
          * Apache parent process so we don't interfere with
@@ -4830,6 +4869,16 @@ static int wsgi_start_process(apr_pool_t *p, WSGIDaemonProcess *daemon)
          */
 
         ap_close_listeners();
+
+        /*
+         * Register signal handler to receive shutdown signal
+         * from Apache parent process.
+         */
+
+        wsgi_daemon_shutdown = 0;
+
+        apr_signal(SIGCHLD, SIG_IGN);
+        apr_signal(SIGTERM, wsgi_signal_handler);
 
         /*
 	 * Flag whether multiple daemon processes or denoted
@@ -4859,39 +4908,6 @@ static int wsgi_start_process(apr_pool_t *p, WSGIDaemonProcess *daemon)
 
         wsgi_python_initialized = 1;
         wsgi_python_child_init(wsgi_daemon_pool);
-
-        /*
-         * Register signal handler to receive shutdown signal
-         * from Apache parent process.
-         */
-
-        wsgi_daemon_shutdown = 0;
-
-        apr_signal(SIGCHLD, SIG_IGN);
-        apr_signal(SIGTERM, wsgi_signal_handler);
-
-        /* Setup daemon process user/group access. */
-
-        wsgi_setup_access(daemon);
-
-        /* Reinitialise accept mutex in daemon process. */
-
-        if (daemon->group->mutex) {
-            status = apr_proc_mutex_child_init(&daemon->group->mutex,
-                                               daemon->group->mutex_path, p);
-
-            if (status != APR_SUCCESS) {
-                ap_log_error(APLOG_MARK, APLOG_EMERG, 0, daemon->group->server,
-                             "mod_wsgi (pid=%d): Couldn't intialise accept "
-                             "mutex in daemon process '%s'.",
-                             getpid(), daemon->group->mutex_path);
-
-                while (!wsgi_daemon_shutdown)
-                    sleep(1);
-
-                exit(-1);
-            }
-        }
 
         /* Run the main routine for the daemon process. */
 
