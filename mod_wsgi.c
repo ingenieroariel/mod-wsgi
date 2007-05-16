@@ -2915,7 +2915,7 @@ static void wsgi_python_init(apr_pool_t *p)
         /* Check for Python paths and optimisation flag. */
 
         if (wsgi_server_config->python_optimize > 0)
-            Py_OptimizeFlag = 2;
+            Py_OptimizeFlag = wsgi_server_config->python_optimize;
         else
             Py_OptimizeFlag = 0;
 
@@ -3677,7 +3677,7 @@ static const char *wsgi_set_python_optimize(cmd_parms *cmd, void *mconfig,
         return error;
 
     sconfig = ap_get_module_config(cmd->server->module_config, &wsgi_module);
-    sconfig->python_optimize = !strcasecmp(f, "On");
+    sconfig->python_optimize = atoi(f);
 
     return NULL;
 }
@@ -4321,7 +4321,7 @@ static const command_rec wsgi_commands[] =
         RSRC_CONF, TAKE2, "Map location to target WSGI script file." },
 
     { "WSGIPythonOptimize", wsgi_set_python_optimize, NULL,
-        RSRC_CONF, TAKE1, "Enable/Disable Python compiler optimisations." },
+        RSRC_CONF, TAKE1, "Set level of Python compiler optimisations." },
 #ifndef WIN32
     { "WSGIPythonExecutable", wsgi_set_python_executable, NULL,
         RSRC_CONF, TAKE1, "Python executable absolute path name." },
@@ -5420,7 +5420,7 @@ static const command_rec wsgi_commands[] =
 #endif
 
     AP_INIT_TAKE1("WSGIPythonOptimize", wsgi_set_python_optimize, NULL,
-        RSRC_CONF, "Enable/Disable Python compiler optimisations."),
+        RSRC_CONF, "Set level of Python compiler optimisations."),
 #ifndef WIN32
     AP_INIT_TAKE1("WSGIPythonExecutable", wsgi_set_python_executable, NULL,
         RSRC_CONF, "Python executable absolute path name."),
