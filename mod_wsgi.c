@@ -5332,6 +5332,27 @@ static apr_status_t wsgi_send_request(request_rec *r,
     return APR_SUCCESS;
 }
 
+static void wsgi_discard_script_output(apr_bucket_brigade *bb)
+{
+    apr_bucket *e;
+    const char *buf;
+    apr_size_t len;
+    apr_status_t rv;
+
+    for (e = APR_BRIGADE_FIRST(bb);
+         e != APR_BRIGADE_SENTINEL(bb);
+         e = APR_BUCKET_NEXT(e))
+    {
+        if (APR_BUCKET_IS_EOS(e)) {
+            break;
+        }
+        rv = apr_bucket_read(e, &buf, &len, APR_BLOCK_READ);
+        if (rv != APR_SUCCESS) {
+            break;
+        }
+    }
+}
+
 static int wsgi_execute_remote(request_rec *r)
 {
     WSGIRequestConfig *config = NULL;
@@ -5491,7 +5512,7 @@ static int wsgi_execute_remote(request_rec *r)
     if (location && location[0] == '/' && r->status == 200) {
 
         /* Soak up all the script output. */
-        discard_script_output(bb);
+        wsgi_discard_script_output(bb);
         apr_brigade_destroy(bb);
 
         /*
@@ -5521,7 +5542,7 @@ static int wsgi_execute_remote(request_rec *r)
          * body, it has to explicitly respond with 302 status.
          */
 
-        discard_script_output(bb);
+        wsgi_discard_script_output(bb);
         apr_brigade_destroy(bb);
 
         return HTTP_MOVED_TEMPORARILY;
