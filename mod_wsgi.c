@@ -1664,6 +1664,7 @@ typedef struct {
         request_rec *r;
         WSGIRequestConfig *config;
         int status;
+        const char *status_line;
         PyObject *headers;
         PyObject *sequence;
         PyObject *log;
@@ -1684,7 +1685,8 @@ static AdapterObject *newAdapterObject(request_rec *r, PyObject *log)
     self->config = (WSGIRequestConfig *)ap_get_module_config(r->request_config,
                                                              &wsgi_module);
 
-    self->status = -1;
+    self->status = HTTP_INTERNAL_SERVER_ERROR;
+    self->status_line = NULL;
     self->headers = NULL;
     self->sequence = NULL;
 
@@ -1723,7 +1725,7 @@ static PyObject *Adapter_start(AdapterObject *self, PyObject *args)
     }
 
     if (exc_info && exc_info != Py_None) {
-        if (self->status != -1 && !self->headers) {
+        if (self->status_line && !self->headers) {
             PyObject *type = NULL;
             PyObject *value = NULL;
             PyObject *traceback = NULL;
@@ -1736,10 +1738,12 @@ static PyObject *Adapter_start(AdapterObject *self, PyObject *args)
             return NULL;
         }
     }
-    else if (self->status != -1 && !self->headers) {
+    else if (self->status_line && !self->headers) {
         PyErr_SetString(PyExc_TypeError, "headers have already been sent");
         return NULL;
     }
+
+    self->status_line = apr_pstrdup(self->r->pool, status);
 
     value = ap_getword(self->r->pool, &status, ' ');
 
@@ -1771,7 +1775,7 @@ static int Adapter_output(AdapterObject *self,
     char *name = NULL;
     char *value = NULL;
 
-    if (self->status == -1) {
+    if (!self->status_line) {
         PyErr_SetString(PyExc_TypeError, "response has not been started");
         return 0;
     }
@@ -1780,6 +1784,7 @@ static int Adapter_output(AdapterObject *self,
         int set = 0;
 
         self->r->status = self->status;
+        self->r->status_line = self->status_line;
 
         for (i = 0; i < PyList_Size(self->headers); i++) {
             if (!PyArg_ParseTuple(PyList_GetItem(self->headers, i),
@@ -1792,7 +1797,19 @@ static int Adapter_output(AdapterObject *self,
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
                 self->r->content_type = apr_pstrdup(self->r->pool, value);
 #else
-                ap_set_content_type(self->r, value);
+                /*
+		 * In a daemon child process we cannot call the
+		 * function ap_set_content_type() as want to
+		 * avoid adding any output filters based on the
+		 * type of file being served as this will be
+		 * done in the main Apache child process which
+		 * proxied the request to the daemon process.
+                 */
+
+                if (*self->config->process_group)
+                    self->r->content_type = apr_pstrdup(self->r->pool, value);
+                else
+                    ap_set_content_type(self->r, value);
 #endif
             }
             else if (!strcasecmp(name, "Content-Length")) {
@@ -1809,11 +1826,11 @@ static int Adapter_output(AdapterObject *self,
 
                 set = 1;
             }
+            else if (!strcasecmp(name, "WWW-Authenticate")) {
+                apr_table_set(self->r->err_headers_out, name, value);
+            }
             else {
-                if (self->status != HTTP_OK)
-                    apr_table_set(self->r->err_headers_out, name, value);
-                else
-                    apr_table_set(self->r->headers_out, name, value);
+                apr_table_set(self->r->headers_out, name, value);
             }
         }
 
@@ -1933,34 +1950,6 @@ static PyObject *Adapter_environ(AdapterObject *self)
 
     object = (PyObject *)newInputObject(r);
     PyDict_SetItemString(environ, "wsgi.input", object);
-    Py_DECREF(object);
-
-    /* Now setup some mod_wsgi specific environment values. */
-
-#if defined(MOD_WSGI_WITH_DAEMONS)
-    object = PyString_FromString(self->config->process_group);
-    PyDict_SetItemString(environ, "mod_wsgi.process_group", object);
-    Py_DECREF(object);
-#endif
-
-    object = PyString_FromString(self->config->application_group);
-    PyDict_SetItemString(environ, "mod_wsgi.application_group", object);
-    Py_DECREF(object);
-
-    object = PyString_FromString(self->config->callable_object);
-    PyDict_SetItemString(environ, "mod_wsgi.callable_object", object);
-    Py_DECREF(object);
-
-    object = PyBool_FromLong(self->config->script_reloading);
-    PyDict_SetItemString(environ, "mod_wsgi.script_reloading", object);
-    Py_DECREF(object);
-
-    object = PyInt_FromLong(self->config->reload_mechanism);
-    PyDict_SetItemString(environ, "mod_wsgi.reload_mechanism", object);
-    Py_DECREF(object);
-
-    object = PyBool_FromLong(self->config->output_buffering);
-    PyDict_SetItemString(environ, "mod_wsgi.output_buffering", object);
     Py_DECREF(object);
 
     return environ;
@@ -4088,11 +4077,6 @@ static void wsgi_build_environment(request_rec *r)
         value = apr_table_get(r->headers_in, "Authorization");
         if (value)
             apr_table_setn(r->subprocess_env, "HTTP_AUTHORIZATION", value);
-
-        value = apr_table_get(r->headers_in, "Proxy-Authorization");
-        if (value)
-            apr_table_setn(r->subprocess_env, "HTTP_PROXY_AUTHORIZATION",
-                           value);
     }
 
     /* If PATH_INFO not set, set it to an empty string. */
@@ -4132,6 +4116,29 @@ static void wsgi_build_environment(request_rec *r)
         ap_no2slash((char*)path_info);
         apr_table_setn(r->subprocess_env, "PATH_INFO", path_info);
     }
+
+    /*
+     * Set values specific to mod_wsgi configuration. These control
+     * aspects of how a request is managed but don't strictly need
+     * to be passed through to the application itself. It is though
+     * easier to set them here as then they are carried across to
+     * the daemon process as part of the environment where they can
+     * be extracted and used.
+     */
+
+    apr_table_setn(r->subprocess_env, "mod_wsgi.process_group",
+                  config->process_group);
+    apr_table_setn(r->subprocess_env, "mod_wsgi.application_group",
+                  config->application_group);
+    apr_table_setn(r->subprocess_env, "mod_wsgi.callable_object",
+                  config->callable_object);
+
+    apr_table_setn(r->subprocess_env, "mod_wsgi.script_reloading",
+                  apr_psprintf(r->pool, "%d", config->script_reloading));
+    apr_table_setn(r->subprocess_env, "mod_wsgi.reload_mechanism",
+                  apr_psprintf(r->pool, "%d", config->reload_mechanism));
+    apr_table_setn(r->subprocess_env, "mod_wsgi.output_buffering",
+                  apr_psprintf(r->pool, "%d", config->output_buffering));
 }
 
 static int wsgi_is_script_aliased(request_rec *r)
@@ -4399,6 +4406,7 @@ module MODULE_VAR_EXPORT wsgi_module = {
 #include "mpm_common.h"
 #include "apr_proc_mutex.h"
 #include "http_connection.h"
+#include "apr_buckets.h"
 
 #if APR_HAVE_SYS_SOCKET_H
 #include <sys/socket.h>
@@ -4433,6 +4441,7 @@ typedef struct {
     gid_t gid;
     int processes;
     int multiprocess;
+    int threads;
     const char *socket;
     int listener_fd;
     const char* mutex_path;
@@ -4472,6 +4481,7 @@ static const char *wsgi_add_start_daemon(cmd_parms *cmd, void *mconfig,
 
     int processes = 1;
     int multiprocess = 0;
+    int threads = 15;
 
     uid_t uid = unixd_config.user_id;
     uid_t gid = unixd_config.group_id;
@@ -4536,6 +4546,15 @@ static const char *wsgi_add_start_daemon(cmd_parms *cmd, void *mconfig,
 
             multiprocess = 1;
         }
+        else if (strstr(option, "threads=") == option) {
+            value = option + 8;
+            if (!*value)
+                return "Invalid thread count for WSGI daemon process.";
+
+            threads = atoi(value);
+            if (threads < 1)
+                return "Invalid thread count for WSGI daemon process.";
+        }
         else
             return "Invalid option to WSGI daemon process definition.";
     }
@@ -4546,6 +4565,11 @@ static const char *wsgi_add_start_daemon(cmd_parms *cmd, void *mconfig,
         config->daemon_list = apr_array_make(config->pool, 20,
                                              sizeof(WSGIProcessGroup));
     }
+
+    /* XXX Multithreading not currently implemented. */
+
+    if (threads != 1)
+        return "Multithreading not currently supported, use threads=1.";
 
     daemons = config->daemon_list;
     entries = (WSGIProcessGroup *)daemons->elts;
@@ -4574,6 +4598,7 @@ static const char *wsgi_add_start_daemon(cmd_parms *cmd, void *mconfig,
 
     entry->processes = processes;
     entry->multiprocess = multiprocess;
+    entry->threads = threads;
 
     return NULL;
 }
@@ -4848,7 +4873,9 @@ static void wsgi_daemon_main(apr_pool_t *p, WSGIDaemonProcess *daemon)
             }
         }
 
-        status = apr_socket_accept(&socket, daemon->listener, p);
+        apr_pool_create(&ptrans, p);
+
+        status = apr_socket_accept(&socket, daemon->listener, ptrans);
 
         if (daemon->group->mutex) {
             if (apr_proc_mutex_unlock(daemon->group->mutex) != APR_SUCCESS) {
@@ -4865,10 +4892,9 @@ static void wsgi_daemon_main(apr_pool_t *p, WSGIDaemonProcess *daemon)
                 continue;
         }
 
-        apr_pool_create(&ptrans, p);
         bucket_alloc = apr_bucket_alloc_create(ptrans);
 
-        wsgi_process_socket(p, socket, bucket_alloc, daemon);
+        wsgi_process_socket(ptrans, socket, bucket_alloc, daemon);
 
         apr_pool_destroy(ptrans);
     }
@@ -4956,7 +4982,7 @@ static int wsgi_start_process(apr_pool_t *p, WSGIDaemonProcess *daemon)
          */
 
         wsgi_multiprocess = daemon->group->multiprocess;
-        wsgi_multithread = 1;
+        wsgi_multithread = daemon->group->threads != 1;
 
         /*
          * Create a pool for the child daemon process so
@@ -5222,12 +5248,105 @@ static int wsgi_connect_daemon(request_rec *r, WSGIDaemonSocket *daemon)
     return OK;
 }
 
+static apr_status_t wsgi_socket_send(int fd, const void *buf, size_t buf_size)
+{
+    int rc;
+
+    do {
+        rc = write(fd, buf, buf_size);
+    } while (rc < 0 && errno == EINTR);
+    if (rc < 0) {
+        return errno;
+    }
+
+    return APR_SUCCESS;
+}
+
+static apr_status_t wsgi_send_string(int fd, const char *s)
+{
+    apr_status_t rv;
+    int l;
+
+    l = strlen(s);
+
+    if ((rv = wsgi_socket_send(fd, &l, sizeof(l))) != APR_SUCCESS)
+        return rv;
+
+    return wsgi_socket_send(fd, s, l);
+}
+
+static apr_status_t wsgi_send_strings(int fd, const char **s)
+{
+    apr_status_t rv;
+    int n;
+    int i;
+
+    for (n = 0; s[n]; n++)
+        continue;
+
+    if ((rv = wsgi_socket_send(fd, &n, sizeof(n))) != APR_SUCCESS)
+        return rv;
+
+    for (i = 0; i < n; i++) {
+        if ((rv = wsgi_send_string(fd, s[i])) != APR_SUCCESS)
+            return rv;
+    }
+
+    return APR_SUCCESS;
+}
+
+static apr_status_t wsgi_send_request(request_rec *r,
+                                      WSGIRequestConfig *config,
+                                      WSGIDaemonSocket *daemon)
+{
+    int rv;
+
+    char **environ;
+    const apr_array_header_t *env_arr;
+    const apr_table_entry_t *elts;
+    int i, j;
+
+    /* Send subprocess environment from request object. */
+
+    env_arr = apr_table_elts(r->subprocess_env);
+    elts = (const apr_table_entry_t *)env_arr->elts;
+
+    environ = (char **)apr_palloc(r->pool,
+                                  ((2*env_arr->nelts)+1)*sizeof(char *));
+
+    for (i=0, j=0; i<env_arr->nelts; ++i) {
+        if (!elts[i].key)
+            continue;
+
+        environ[j++] = elts[i].key;
+        environ[j++] = elts[i].val ? elts[i].val : "";
+    }
+
+    environ[j] = NULL;
+
+    rv = wsgi_send_strings(daemon->fd, (const char **)environ);
+
+    if (rv != APR_SUCCESS)
+        return rv;
+
+    return APR_SUCCESS;
+}
+
 static int wsgi_execute_remote(request_rec *r)
 {
     WSGIRequestConfig *config = NULL;
     WSGIDaemonSocket *daemon = NULL;
 
     int status;
+    apr_status_t rv;
+
+    int seen_eos;
+    int child_stopped_reading;
+    apr_file_t *tempsock;
+    apr_bucket_brigade *bb;
+    apr_bucket *b;
+
+    const char *location;
 
     /* Grab request configuration. */
 
@@ -5252,32 +5371,480 @@ static int wsgi_execute_remote(request_rec *r)
         return HTTP_INTERNAL_SERVER_ERROR;
     }
 
-    /* Creation connection to the daemon process. */
+    /* Create connection to the daemon process. */
 
-    status = wsgi_connect_daemon(r, daemon);
-
-    if (status != OK)
+    if ((status = wsgi_connect_daemon(r, daemon)) != OK)
         return status;
 
-    /* XXX Haven't finished yet. */
+    /* Send request details and subprocess environment. */
+        
+    if ((rv = wsgi_send_request(r, config, daemon)) != APR_SUCCESS) {
+        ap_log_rerror(APLOG_MARK, APLOG_ERR, rv, r,
+                     "mod_wsgi (pid=%d): Unable to send request details "
+                     "to WSGI daemon process '%s' on '%s'.", getpid(),
+                     daemon->name, daemon->socket);
 
-    wsgi_log_script_error(r, "Sorry, proxying to a WSGI daemon process "
-                          "is still being implemented", r->filename);
+        return HTTP_INTERNAL_SERVER_ERROR;
+    }
 
-    return HTTP_INTERNAL_SERVER_ERROR;
+    /*
+     * Wrap the socket in an APR file object so that socket can
+     * be more easily written to and so that pipe bucket can be
+     * created later for reading from it. Note we file object is
+     * initialised such that it will close socket when no longer
+     * required so can kill off registration done at higher
+     * level to close socket.
+     */
+
+    apr_os_pipe_put_ex(&tempsock, &daemon->fd, 1, r->pool);
+    apr_pool_cleanup_kill(r->pool, daemon, wsgi_close_socket);
+
+    /* Transfer any request content which was provided. */
+
+    seen_eos = 0;
+    child_stopped_reading = 0;
+
+    bb = apr_brigade_create(r->pool, r->connection->bucket_alloc);
+
+    do {
+        apr_bucket *bucket;
+
+        rv = ap_get_brigade(r->input_filters, bb, AP_MODE_READBYTES,
+                            APR_BLOCK_READ, HUGE_STRING_LEN);
+
+        if (rv != APR_SUCCESS) {
+            ap_log_rerror(APLOG_MARK, APLOG_ERR, rv, r,
+                         "mod_wsgi (pid=%d): Unable to get bucket brigade "
+                         "for request.", getpid());
+            return HTTP_INTERNAL_SERVER_ERROR;
+        }
+
+        for (bucket = APR_BRIGADE_FIRST(bb);
+             bucket != APR_BRIGADE_SENTINEL(bb);
+             bucket = APR_BUCKET_NEXT(bucket))
+        {
+            const char *data;
+            apr_size_t len;
+
+            if (APR_BUCKET_IS_EOS(bucket)) {
+                seen_eos = 1;
+                break;
+            }
+
+            /* We can't do much with this. */
+            if (APR_BUCKET_IS_FLUSH(bucket)) {
+                continue;
+            }
+
+            /* If the child stopped, we still must read to EOS. */
+            if (child_stopped_reading) {
+                continue;
+            }
+
+            /* Read block. */
+            apr_bucket_read(bucket, &data, &len, APR_BLOCK_READ);
+
+            /*
+	     * Keep writing data to the child until done or too
+	     * much time elapses with no progress or an error
+	     * occurs. (XXX Does a timeout actually occur?)
+             */
+            rv = apr_file_write_full(tempsock, data, len, NULL);
+
+            if (rv != APR_SUCCESS) {
+                /* Daemon stopped reading, discard remainder. */
+                child_stopped_reading = 1;
+            }
+        }
+        apr_brigade_cleanup(bb);
+    }
+    while (!seen_eos);
+
+    /*
+     * Close socket for writing so that daemon detects end of
+     * request content.
+     */
+
+    shutdown(daemon->fd, 1);
+
+    /* Setup bucket brigade for reading response from daemon. */
+
+    bb = apr_brigade_create(r->pool, r->connection->bucket_alloc);
+    b = apr_bucket_pipe_create(tempsock, r->connection->bucket_alloc);
+    APR_BRIGADE_INSERT_TAIL(bb, b);
+    b = apr_bucket_eos_create(r->connection->bucket_alloc);
+    APR_BRIGADE_INSERT_TAIL(bb, b);
+
+    /* Scan the CGI script like headers from daemon. */
+
+    if ((status = ap_scan_script_header_err_brigade(r, bb, NULL))) {
+        return HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    /*
+     * Look for any redirects to be handled within server.
+     * (XXX Should this actually be done as possibly not
+     * being done when daemon process not being used. */
+
+    location = apr_table_get(r->headers_out, "Location");
+
+    if (location && location[0] == '/' && r->status == 200) {
+
+        /* Soak up all the script output. */
+        discard_script_output(bb);
+        apr_brigade_destroy(bb);
+
+        /*
+	 * This redirect needs to be a GET no matter what the
+	 * original method was.
+         */
+
+        r->method = apr_pstrdup(r->pool, "GET");
+        r->method_number = M_GET;
+
+        /*
+	 * We already read the message body (if any), so don't
+	 * allow the redirected request to think it has one. We
+	 * can ignore Transfer-Encoding, since we used
+	 * REQUEST_CHUNKED_ERROR.
+         */
+
+        apr_table_unset(r->headers_in, "Content-Length");
+
+        ap_internal_redirect_handler(location, r);
+
+        return OK;
+    }
+    else if (location && r->status == 200) {
+        /*
+         * Note that if a script wants to produce its own redirect
+         * body, it has to explicitly respond with 302 status.
+         */
+
+        discard_script_output(bb);
+        apr_brigade_destroy(bb);
+
+        return HTTP_MOVED_TEMPORARILY;
+    }
+
+    /* Transfer any response content. */
+
+    ap_pass_brigade(r->output_filters, bb);
+
+    return OK;
+}
+
+static apr_status_t wsgi_socket_read(int fd, void *vbuf, size_t buf_size)
+{
+    char *buf = vbuf;
+    int rc;
+    size_t bytes_read = 0;
+
+    do {
+        do {
+            rc = read(fd, buf + bytes_read, buf_size - bytes_read);
+        } while (rc < 0 && (errno == EINTR || errno == EAGAIN));
+        switch(rc) {
+        case -1:
+            return errno;
+        case 0: /* unexpected */
+            return ECONNRESET;
+        default:
+            bytes_read += rc;
+        }
+    } while (bytes_read < buf_size);
+
+    return APR_SUCCESS;
+}
+
+static apr_status_t wsgi_read_string(int fd, char **s, apr_pool_t *p)
+{
+    apr_status_t rv;
+    int l;
+
+    if ((rv = wsgi_socket_read(fd, &l, sizeof(l))) != APR_SUCCESS)
+        return rv;
+
+    *s = apr_pcalloc(p, l+1);
+
+    if (!l)
+        return APR_SUCCESS;
+
+    return wsgi_socket_read(fd, *s, l);
+}
+
+static apr_status_t wsgi_read_strings(int fd, char ***s, apr_pool_t *p)
+{
+    apr_status_t rv;
+    int n;
+    int i;
+
+    if ((rv = wsgi_socket_read(fd, &n, sizeof(n))) != APR_SUCCESS)
+        return rv;
+
+    *s = apr_pcalloc(p, (n+1)*sizeof(**s));
+
+    for (i = 0; i < n; i++) {
+        if ((rv = wsgi_read_string(fd, &(*s)[i], p)) != APR_SUCCESS)
+            return rv;
+    }
+
+    return APR_SUCCESS;
+}
+
+static apr_status_t wsgi_read_request(int sockfd, request_rec *r)
+{
+    int rv;
+
+    pid_t ppid;
+    char **environ;
+
+    /* Read subprocess environment from request object. */
+
+    rv = wsgi_read_strings(sockfd, &environ, r->pool);
+
+    if (rv != APR_SUCCESS)
+        return rv;
+
+    while (*environ) {
+        char *key = *environ++;
+
+        apr_table_setn(r->subprocess_env, key, *environ++);
+    }
+
+    return APR_SUCCESS;
+}
+
+static ap_filter_rec_t *wsgi_header_filter_handle;
+
+apr_status_t wsgi_header_filter(ap_filter_t *f, apr_bucket_brigade *b)   
+{
+    request_rec *r = f->r;
+
+    struct iovec vec1[4];
+    apr_bucket_brigade *b2;
+    char crlf[] = CRLF;
+    apr_size_t buflen;
+
+    const apr_array_header_t *elts;
+    const apr_table_entry_t *t_elt;
+    const apr_table_entry_t *t_end;
+    struct iovec *vec2;
+    struct iovec *vec2_next;
+
+    /* Output status line. */
+
+    vec1[0].iov_base = (void *)"Status:";
+    vec1[0].iov_len  = strlen("Status:");
+    vec1[1].iov_base = (void *)" ";
+    vec1[1].iov_len  = sizeof(" ") - 1;
+    vec1[2].iov_base = (void *)(r->status_line);
+    vec1[2].iov_len  = strlen(r->status_line);
+    vec1[3].iov_base = (void *)CRLF;
+    vec1[3].iov_len  = sizeof(CRLF) - 1;
+
+    b2 = apr_brigade_create(r->pool, r->connection->bucket_alloc);
+    apr_brigade_writev(b2, NULL, NULL, vec1, 4);
+
+    /* Merge response header tables together. */
+
+    if (!apr_is_empty_table(r->err_headers_out)) {
+        r->headers_out = apr_table_overlay(r->pool, r->err_headers_out,
+                                           r->headers_out);
+    }
+
+    /* Override the content type for response. */
+
+    if (r->content_type)
+        apr_table_setn(r->headers_out, "Content-Type", r->content_type);
+
+    /* Formt the response headers for output. */
+
+    elts = apr_table_elts(r->headers_out);
+    if (elts->nelts != 0) {
+        t_elt = (const apr_table_entry_t *)(elts->elts);
+        t_end = t_elt + elts->nelts;
+        vec2 = (struct iovec *)apr_palloc(r->pool, 4 * elts->nelts *
+                                          sizeof(struct iovec));
+        vec2_next = vec2;
+
+        do {
+            vec2_next->iov_base = (void*)(t_elt->key);
+            vec2_next->iov_len = strlen(t_elt->key);
+            vec2_next++;
+            vec2_next->iov_base = ": ";
+            vec2_next->iov_len = sizeof(": ") - 1;
+            vec2_next++;
+            vec2_next->iov_base = (void*)(t_elt->val);
+            vec2_next->iov_len = strlen(t_elt->val);
+            vec2_next++;
+            vec2_next->iov_base = CRLF;
+            vec2_next->iov_len = sizeof(CRLF) - 1;
+            vec2_next++;
+            t_elt++;
+        } while (t_elt < t_end);
+
+        apr_brigade_writev(b2, NULL, NULL, vec2, vec2_next - vec2);
+    }
+
+    /* Format terminating blank line for response headers. */
+
+    buflen = strlen(crlf);
+    apr_brigade_write(b2, NULL, NULL, crlf, buflen);
+
+    /* Output the response headers. */
+
+    ap_pass_brigade(f->next, b2);
+
+    /* Remove ourselves from filter chain so we aren't called again. */
+
+    ap_remove_output_filter(f);
+
+    /* Output the partial response content. */
+
+    return ap_pass_brigade(f->next, b);
 }
 
 static int wsgi_hook_daemon_connect(conn_rec *c)
 {
+    apr_socket_t *csd;
+    int sockfd = -1;
+    request_rec *r;
+    apr_pool_t *p;
+    apr_status_t rv;
+
+    WSGIRequestConfig *config;
+
     /* Don't do anything if not in daemon process. */
 
     if (!wsgi_daemon_pool)
         return DECLINED;
 
-    ap_log_error(APLOG_MARK, APLOG_ERR, 0, 0, "mod_wsgi (pid=%d): "
-                 "wsgi_hook_daemon_connect()", getpid());
+    /* Create and populate our own request object. */
 
-    return DONE;
+    apr_pool_create(&p, c->pool);
+    r = apr_pcalloc(p, sizeof(request_rec));
+
+    r->pool = p;
+    r->connection = c;
+    r->server = c->base_server;
+    
+    r->user = NULL;
+    r->ap_auth_type = NULL;
+    
+    r->allowed_methods = ap_make_method_list(p, 2);
+
+    r->headers_in = apr_table_make(r->pool, 25);
+    r->subprocess_env = apr_table_make(r->pool, 25);
+    r->headers_out = apr_table_make(r->pool, 12);
+    r->err_headers_out = apr_table_make(r->pool, 5);
+    r->notes = apr_table_make(r->pool, 5);
+    
+    r->request_config  = ap_create_request_config(r->pool);
+
+    r->proto_output_filters = c->output_filters;
+    r->output_filters = r->proto_output_filters;
+    r->proto_input_filters = c->input_filters;
+    r->input_filters = r->proto_input_filters;
+
+    r->per_dir_config  = r->server->lookup_defaults;
+
+    r->sent_bodyct = 0;
+
+    r->read_length = 0;
+    r->read_body = REQUEST_NO_BODY;
+
+    r->status = HTTP_INTERNAL_SERVER_ERROR;
+    r->the_request = NULL;
+
+    r->used_path_info = AP_REQ_DEFAULT_PATH_INFO;
+
+    /*
+     * Install our own output filter for writing back headers in
+     * CGI script style.
+     */
+
+    ap_add_output_filter_handle(wsgi_header_filter_handle,
+                                NULL, r, r->connection);
+
+    /* Create and install the WSGI request config. */
+
+    config = (WSGIRequestConfig *)apr_pcalloc(r->pool,
+                                              sizeof(WSGIRequestConfig));
+    ap_set_module_config(r->request_config, &wsgi_module, (void *)config);
+
+    /*
+     * Stash the socket into the connection core config so
+     * that core input and output filters will work.
+     */
+
+    csd = ap_get_module_config(c->conn_config, &core_module);
+    apr_os_sock_get(&sockfd, csd);
+
+    /* Read in the request details and setup request object. */
+
+    if ((rv = wsgi_read_request(sockfd, r)) != APR_SUCCESS) {
+        ap_log_error(APLOG_MARK, APLOG_CRIT, rv, 0, "mod_wsgi (pid=%d): "
+                     "Unable to read WSGI request.", getpid());
+
+        apr_pool_destroy(p);
+
+        return HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    /* Set target of request and recalculate modification time. */
+
+    r->filename = (char *)apr_table_get(r->subprocess_env, "SCRIPT_FILENAME");
+
+    apr_stat(&r->finfo, r->filename, APR_FINFO_SIZE, r->pool);
+
+    /* Set details of the remote client and calculate virtual host. */
+
+    r->connection->remote_ip = (char *)apr_table_get(r->subprocess_env,
+                                                     "REMOTE_ADDR");
+
+    /* XXX Still need to work out how to fake this. */
+    /* ap_update_vhost_given_ip(r->connection) */
+    /* ap_update_vhost_from_headers(r); */
+
+    /*
+     * Set content length of any request content and add the
+     * standard HTTP input filter so that standard input routines
+     * for request content will work.
+     */
+
+    if (apr_table_get(r->subprocess_env, "CONTENT_LENGTH")) {
+        apr_table_setn(r->headers_in, "Content-Length",
+                       apr_table_get(r->subprocess_env, "CONTENT_LENGTH"));
+    }
+
+    ap_add_input_filter("HTTP_IN", NULL, r, r->connection);
+
+    /* Set details of WSGI specific request config. */
+
+    config->process_group = apr_table_get(r->subprocess_env,
+                                          "mod_wsgi.process_group");
+    config->application_group = apr_table_get(r->subprocess_env,
+                                              "mod_wsgi.application_group");
+    config->callable_object = apr_table_get(r->subprocess_env,
+                                            "mod_wsgi.callable_object");
+
+    config->script_reloading = atoi(apr_table_get(r->subprocess_env,
+                                                  "mod_wsgi.script_reloading"));
+    config->reload_mechanism = atoi(apr_table_get(r->subprocess_env,
+                                                  "mod_wsgi.reload_mechanism"));
+    config->output_buffering = atoi(apr_table_get(r->subprocess_env,
+                                                  "mod_wsgi.output_buffering"));
+
+    /* Run normal Apache process request routine to handle request. */
+
+    r->status = HTTP_OK;
+
+    ap_process_request(r);
+
+    apr_pool_destroy(p);
+
+    return OK;
 }
 
 static int wsgi_hook_daemon_handler(request_rec *r, int lookup_uri)
@@ -5286,6 +5853,8 @@ static int wsgi_hook_daemon_handler(request_rec *r, int lookup_uri)
 
     if (!wsgi_daemon_pool)
         return DECLINED;
+
+    ap_setup_client_block(r, REQUEST_CHUNKED_ERROR);
 
     /* Execute the target WSGI application. */
 
@@ -5306,19 +5875,6 @@ static int wsgi_hook_init(apr_pool_t *pconf, apr_pool_t *ptemp,
     char package[128];
 
     int status = OK;
-
-    /*
-     * No need to perform init in Win32 parent processes as
-     * the lack of fork on Win32 means we get no benefit as far
-     * as inheriting a preinitialized Python interpreter.
-     */
-
-#if 0
-#if defined(WIN32)
-    if (!getenv("AP_PARENT_PID"))
-        return OK;
-#endif
-#endif
 
     /*
      * Init function gets called twice during startup, we only
@@ -5402,6 +5958,11 @@ static void wsgi_register_hooks(apr_pool_t *p)
                                APR_HOOK_REALLY_FIRST);
     ap_hook_quick_handler(wsgi_hook_daemon_handler, NULL, NULL,
                                APR_HOOK_REALLY_FIRST);
+
+    wsgi_header_filter_handle =
+        ap_register_output_filter("WSGI_HEADER", wsgi_header_filter,
+                                  NULL, AP_FTYPE_PROTOCOL);
+
 #endif
 }
 
