@@ -4860,7 +4860,7 @@ static void wsgi_daemon_main(apr_pool_t *p, WSGIDaemonProcess *daemon)
 
     while (!wsgi_daemon_shutdown) {
         if (daemon->group->mutex) {
-            if (apr_proc_mutex_unlock(daemon->group->mutex) != APR_SUCCESS) {
+            if (apr_proc_mutex_lock(daemon->group->mutex) != APR_SUCCESS) {
                 ap_log_error(APLOG_MARK, APLOG_ERR, 0, daemon->group->server,
                              "mod_wsgi (pid=%d): Couldn't acquire accept "
                              "mutex '%s'.", getpid(), daemon->group->socket);
