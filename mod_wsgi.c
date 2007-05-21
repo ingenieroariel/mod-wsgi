@@ -74,6 +74,7 @@ typedef time_t apr_time_t;
 #include "ap_listen.h"
 #endif
 
+#include "apr_version.h"
 #include "ap_config.h"
 #include "http_core.h"
 #include "http_log.h"
@@ -114,6 +115,7 @@ typedef regmatch_t ap_regmatch_t;
 #endif
 
 #if defined(MOD_WSGI_WITH_DAEMONS)
+
 #if !AP_MODULE_MAGIC_AT_LEAST(20051115,0)
 static void ap_close_listeners(void)
 {
@@ -125,6 +127,36 @@ static void ap_close_listeners(void)
     }
 }
 #endif
+
+#if (APR_MAJOR_VERSION == 0) && \
+    (APR_MINOR_VERSION == 9) && \
+    (APR_PATCH_VERSION < 5)
+static apr_status_t apr_unix_file_cleanup(void *thefile)
+{
+    apr_file_t *file = thefile;
+
+    return apr_file_close(file);
+}
+
+static apr_status_t apr_os_pipe_put_ex(apr_file_t **file,
+                                       apr_os_file_t *thefile,
+                                       int register_cleanup,
+                                       apr_pool_t *pool)
+{
+    apr_status_t rv;
+
+    rv = apr_os_pipe_put(file, thefile, pool);
+
+    if (register_cleanup) {
+        apr_pool_cleanup_register(pool, (void *)(*file),
+                                  apr_unix_file_cleanup,
+                                  apr_pool_cleanup_null);
+    }   
+
+    return rv;
+}
+#endif
+
 #endif
 
 /* Version information. */
