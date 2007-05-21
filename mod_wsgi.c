@@ -4868,10 +4868,6 @@ static void wsgi_daemon_main(apr_pool_t *p, WSGIDaemonProcess *daemon)
                                  daemon->group->server, "mod_wsgi (pid=%d): "
                                  "Couldn't acquire accept mutex '%s'.",
                                  getpid(), daemon->group->socket);
-
-                    /* Don't die immediately to avoid a fork bomb. */
-
-                    sleep(20);
                 }
 
                 return;
