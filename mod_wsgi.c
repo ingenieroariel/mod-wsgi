@@ -4860,14 +4860,19 @@ static void wsgi_daemon_main(apr_pool_t *p, WSGIDaemonProcess *daemon)
 
     while (!wsgi_daemon_shutdown) {
         if (daemon->group->mutex) {
-            if (apr_proc_mutex_lock(daemon->group->mutex) != APR_SUCCESS) {
-                ap_log_error(APLOG_MARK, APLOG_ERR, 0, daemon->group->server,
-                             "mod_wsgi (pid=%d): Couldn't acquire accept "
-                             "mutex '%s'.", getpid(), daemon->group->socket);
+            apr_status_t rv;
+            rv = apr_proc_mutex_lock(daemon->group->mutex);
+            if (rv != APR_SUCCESS) {
+                if (!wsgi_daemon_shutdown) {
+                    ap_log_error(APLOG_MARK, APLOG_ERR, rv,
+                                 daemon->group->server, "mod_wsgi (pid=%d): "
+                                 "Couldn't acquire accept mutex '%s'.",
+                                 getpid(), daemon->group->socket);
 
-                /* Don't die immediately to avoid a fork bomb. */
+                    /* Don't die immediately to avoid a fork bomb. */
 
-                sleep(20);
+                    sleep(20);
+                }
 
                 return;
             }
@@ -4878,12 +4883,17 @@ static void wsgi_daemon_main(apr_pool_t *p, WSGIDaemonProcess *daemon)
         status = apr_socket_accept(&socket, daemon->listener, ptrans);
 
         if (daemon->group->mutex) {
-            if (apr_proc_mutex_unlock(daemon->group->mutex) != APR_SUCCESS) {
-                ap_log_error(APLOG_MARK, APLOG_ERR, 0, daemon->group->server,
-                             "mod_wsgi (pid=%d): Couldn't release accept "
-                             "mutex '%s'.", getpid(), daemon->group->socket);
+            apr_status_t rv;
+            rv = apr_proc_mutex_unlock(daemon->group->mutex);
+            if (rv != APR_SUCCESS) {
+                if (!wsgi_daemon_shutdown) {
+                    ap_log_error(APLOG_MARK, APLOG_ERR, rv,
+                                 daemon->group->server, "mod_wsgi (pid=%d): "
+                                 "Couldn't release accept mutex '%s'.",
+                                 getpid(), daemon->group->socket);
 
-                return;
+                    return;
+                }
             }
         }
 
