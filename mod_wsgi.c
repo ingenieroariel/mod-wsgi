@@ -5030,8 +5030,34 @@ static int wsgi_start_process(apr_pool_t *p, WSGIDaemonProcess *daemon)
         apr_pool_create(&wsgi_daemon_pool, p);
 
         /*
+	 * If mod_python is also being loaded and thus it was
+	 * responsible for initialising Python it can leave in
+	 * place an active thread state. Under normal conditions
+	 * this would be eliminated in Apache child process by
+	 * the time that mod_wsgi got to do its own child
+	 * initialisation but in daemon process we skip the
+	 * mod_python child initialisation so the active thread
+	 * state still exists. Thus need to do a bit of a fiddle
+	 * to ensure there is no active thread state.
+         */
+
+        if (!wsgi_python_initialized) {
+            PyGILState_STATE state;
+
+            PyEval_AcquireLock();
+
+            state = PyGILState_Ensure();
+            PyGILState_Release(state);
+
+            if (state == PyGILState_LOCKED)
+                PyThreadState_Swap(NULL);
+
+            PyEval_ReleaseLock();
+        }
+
+        /*
          * Setup Python in the child daemon process. Note that
-         * we ensure that we are marked as the original
+         * we ensure that we are now marked as the original
          * initialiser of the Python interpreter even though
          * mod_python might have done it, as we will be the one
          * to cleanup the child daemon process and not
