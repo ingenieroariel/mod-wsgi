@@ -5431,8 +5431,6 @@ static int wsgi_execute_remote(request_rec *r)
     apr_bucket_brigade *bb;
     apr_bucket *b;
 
-    const char *location;
-
     /* Grab request configuration. */
 
     config = (WSGIRequestConfig *)ap_get_module_config(r->request_config,
@@ -5576,52 +5574,6 @@ static int wsgi_execute_remote(request_rec *r)
 
     if (r->status == 0)
         return HTTP_INTERNAL_SERVER_ERROR;
-
-    /*
-     * Look for any redirects to be handled within server.
-     * (XXX Should this actually be done as possibly not
-     * being done when daemon process not being used. */
-
-    location = apr_table_get(r->headers_out, "Location");
-
-    if (location && location[0] == '/' && r->status == 200) {
-
-        /* Soak up all the script output. */
-        wsgi_discard_script_output(bb);
-        apr_brigade_destroy(bb);
-
-        /*
-	 * This redirect needs to be a GET no matter what the
-	 * original method was.
-         */
-
-        r->method = apr_pstrdup(r->pool, "GET");
-        r->method_number = M_GET;
-
-        /*
-	 * We already read the message body (if any), so don't
-	 * allow the redirected request to think it has one. We
-	 * can ignore Transfer-Encoding, since we used
-	 * REQUEST_CHUNKED_ERROR.
-         */
-
-        apr_table_unset(r->headers_in, "Content-Length");
-
-        ap_internal_redirect_handler(location, r);
-
-        return OK;
-    }
-    else if (location && r->status == 200) {
-        /*
-         * Note that if a script wants to produce its own redirect
-         * body, it has to explicitly respond with 302 status.
-         */
-
-        wsgi_discard_script_output(bb);
-        apr_brigade_destroy(bb);
-
-        return HTTP_MOVED_TEMPORARILY;
-    }
 
     /* Transfer any response content. */
 
