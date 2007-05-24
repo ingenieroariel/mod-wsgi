@@ -5567,6 +5567,17 @@ static int wsgi_execute_remote(request_rec *r)
     }
 
     /*
+     * Look for special case of status being 0 and
+     * translate it into a 500 error so that error
+     * document processing will occur for those cases
+     * where WSGI application wouldn't have supplied
+     * their own error document.
+     */
+
+    if (r->status == 0)
+        return HTTP_INTERNAL_SERVER_ERROR;
+
+    /*
      * Look for any redirects to be handled within server.
      * (XXX Should this actually be done as possibly not
      * being done when daemon process not being used. */
@@ -5790,7 +5801,7 @@ apr_status_t wsgi_header_filter(ap_filter_t *f, apr_bucket_brigade *b)
     return ap_pass_brigade(f->next, b);
 }
 
-static int wsgi_hook_daemon_connect(conn_rec *c)
+static int wsgi_hook_daemon_handler(conn_rec *c)
 {
     apr_socket_t *csd;
     int sockfd = -1;
@@ -5799,6 +5810,9 @@ static int wsgi_hook_daemon_connect(conn_rec *c)
     apr_status_t rv;
 
     WSGIRequestConfig *config;
+
+    apr_bucket *e;
+    apr_bucket_brigade *bb;
 
     /* Don't do anything if not in daemon process. */
 
@@ -5921,29 +5935,57 @@ static int wsgi_hook_daemon_connect(conn_rec *c)
     config->output_buffering = atoi(apr_table_get(r->subprocess_env,
                                                   "mod_wsgi.output_buffering"));
 
-    /* Run normal Apache process request routine to handle request. */
+    /*
+     * Define how input data is to be processed. This
+     * was already down in the Apache child process and
+     * so it shouldn't fail. More importantly, it sets
+     * up request data tracking how much input has been
+     * read or if more remains.
+     */
+
+    ap_setup_client_block(r, REQUEST_CHUNKED_ERROR);
+
+    /*
+     * Execute the actual target WSGI application. In
+     * normal cases OK should always be returned. If
+     * however an error occurs in importing or executing
+     * the script or the Python code raises an exception
+     * which is not caught and handled, then an internal
+     * server error can be returned. As we don't want to
+     * be triggering any error document handlers in the
+     * daemon process we use a fake status line with 0
+     * as the status value. This will be picked up in
+     * the Apache child process which will translate it
+     * back to a 500 error so that normal error document
+     * processing occurs.
+     */
 
     r->status = HTTP_OK;
 
-    ap_process_request(r);
+    if (wsgi_execute_script(r) != OK) {
+        r->status = HTTP_INTERNAL_SERVER_ERROR;
+        r->status_line = "0 Internal Server Error";
+    }
+
+    /*
+     * Ensure that request is finalised and any response
+     * is flushed out. This will as a side effect read
+     * any input data which wasn't consumed, thus
+     * ensuring that the Apache child process isn't hung
+     * waiting to send the request content and can
+     * therefore process the response correctly.
+     */
+
+    ap_finalize_request_protocol(r);
+
+    bb = apr_brigade_create(r->pool, c->bucket_alloc);
+    e = apr_bucket_flush_create(c->bucket_alloc);
+    APR_BRIGADE_INSERT_HEAD(bb, e);
+    ap_pass_brigade(r->connection->output_filters, bb);
 
     apr_pool_destroy(p);
 
     return OK;
-}
-
-static int wsgi_hook_daemon_handler(request_rec *r, int lookup_uri)
-{
-    /* Don't do anything if not in daemon process. */
-
-    if (!wsgi_daemon_pool)
-        return DECLINED;
-
-    ap_setup_client_block(r, REQUEST_CHUNKED_ERROR);
-
-    /* Execute the target WSGI application. */
-
-    return wsgi_execute_script(r);
 }
 
 #endif
@@ -6039,15 +6081,12 @@ static void wsgi_register_hooks(apr_pool_t *p)
     ap_hook_handler(wsgi_hook_handler, NULL, NULL, APR_HOOK_MIDDLE);
 
 #if defined(MOD_WSGI_WITH_DAEMONS)
-    ap_hook_process_connection(wsgi_hook_daemon_connect, NULL, NULL,
-                               APR_HOOK_REALLY_FIRST);
-    ap_hook_quick_handler(wsgi_hook_daemon_handler, NULL, NULL,
+    ap_hook_process_connection(wsgi_hook_daemon_handler, NULL, NULL,
                                APR_HOOK_REALLY_FIRST);
 
     wsgi_header_filter_handle =
         ap_register_output_filter("WSGI_HEADER", wsgi_header_filter,
                                   NULL, AP_FTYPE_PROTOCOL);
-
 #endif
 }
 
