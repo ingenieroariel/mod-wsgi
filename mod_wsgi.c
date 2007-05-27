@@ -151,7 +151,7 @@ static apr_status_t apr_os_pipe_put_ex(apr_file_t **file,
         apr_pool_cleanup_register(pool, (void *)(*file),
                                   apr_unix_file_cleanup,
                                   apr_pool_cleanup_null);
-    }   
+    }
 
     return rv;
 }
@@ -1830,12 +1830,12 @@ static int Adapter_output(AdapterObject *self,
                 self->r->content_type = apr_pstrdup(self->r->pool, value);
 #else
                 /*
-		 * In a daemon child process we cannot call the
-		 * function ap_set_content_type() as want to
-		 * avoid adding any output filters based on the
-		 * type of file being served as this will be
-		 * done in the main Apache child process which
-		 * proxied the request to the daemon process.
+                 * In a daemon child process we cannot call the
+                 * function ap_set_content_type() as want to
+                 * avoid adding any output filters based on the
+                 * type of file being served as this will be
+                 * done in the main Apache child process which
+                 * proxied the request to the daemon process.
                  */
 
                 if (*self->config->process_group)
@@ -4073,6 +4073,8 @@ static void wsgi_build_environment(request_rec *r)
     const char *script_name = NULL;
     const char *path_info = NULL;
 
+    conn_rec *c = r->connection;
+
     /* Grab request configuration. */
 
     config = (WSGIRequestConfig *)ap_get_module_config(r->request_config,
@@ -4159,18 +4161,23 @@ static void wsgi_build_environment(request_rec *r)
      */
 
     apr_table_setn(r->subprocess_env, "mod_wsgi.process_group",
-                  config->process_group);
+                   config->process_group);
     apr_table_setn(r->subprocess_env, "mod_wsgi.application_group",
-                  config->application_group);
+                   config->application_group);
     apr_table_setn(r->subprocess_env, "mod_wsgi.callable_object",
-                  config->callable_object);
+                   config->callable_object);
 
     apr_table_setn(r->subprocess_env, "mod_wsgi.script_reloading",
-                  apr_psprintf(r->pool, "%d", config->script_reloading));
+                   apr_psprintf(r->pool, "%d", config->script_reloading));
     apr_table_setn(r->subprocess_env, "mod_wsgi.reload_mechanism",
-                  apr_psprintf(r->pool, "%d", config->reload_mechanism));
+                   apr_psprintf(r->pool, "%d", config->reload_mechanism));
     apr_table_setn(r->subprocess_env, "mod_wsgi.output_buffering",
-                  apr_psprintf(r->pool, "%d", config->output_buffering));
+                   apr_psprintf(r->pool, "%d", config->output_buffering));
+
+    apr_table_setn(r->subprocess_env, "mod_wsgi.listener_host",
+                   c->local_addr->hostname ? c->local_addr->hostname : "");
+    apr_table_setn(r->subprocess_env, "mod_wsgi.listener_port",
+                   apr_psprintf(r->pool, "%d", c->local_addr->port));
 }
 
 static int wsgi_is_script_aliased(request_rec *r)
@@ -4498,6 +4505,7 @@ static apr_pool_t *wsgi_daemon_pool = NULL;
 
 static int wsgi_daemon_count = 0;
 static apr_table_t *wsgi_daemon_sockets = NULL;
+static apr_hash_t *wsgi_daemon_listeners = NULL;
 
 static int wsgi_daemon_shutdown = 0;
 
@@ -4942,7 +4950,9 @@ static int wsgi_start_process(apr_pool_t *p, WSGIDaemonProcess *daemon)
 {
     apr_status_t status;
 
-    if ((status = apr_proc_fork(&daemon->process, p)) < 0) { 
+    ap_listen_rec *lr;
+
+    if ((status = apr_proc_fork(&daemon->process, p)) < 0) {
         ap_log_error(APLOG_MARK, APLOG_ERR, errno, daemon->group->server,
                      "mod_wsgi: Couldn't spawn process '%s'.",
                      daemon->group->name);
@@ -4996,6 +5006,31 @@ static int wsgi_start_process(apr_pool_t *p, WSGIDaemonProcess *daemon)
         }
 
         /*
+         * Create a lookup table of listener socket address
+         * details so can use it later in daemon when trying
+         * to map request to correct virtual host server.
+         */
+
+        wsgi_daemon_listeners = apr_hash_make(p);
+
+        for (lr = ap_listeners; lr; lr = lr->next) {
+            char *key;
+            char *host;
+            apr_port_t port;
+
+            host = lr->bind_addr->hostname;
+            port = lr->bind_addr->port;
+
+            if (!host)
+                host = "";
+
+            key = apr_psprintf(p, "%s|%d", host, port);
+
+            apr_hash_set(wsgi_daemon_listeners, key, APR_HASH_KEY_STRING,
+                         lr->bind_addr);
+        }
+
+        /*
          * Close child copy of the listening sockets for the
          * Apache parent process so we don't interfere with
          * the parent process.
@@ -5030,15 +5065,15 @@ static int wsgi_start_process(apr_pool_t *p, WSGIDaemonProcess *daemon)
         apr_pool_create(&wsgi_daemon_pool, p);
 
         /*
-	 * If mod_python is also being loaded and thus it was
-	 * responsible for initialising Python it can leave in
-	 * place an active thread state. Under normal conditions
-	 * this would be eliminated in Apache child process by
-	 * the time that mod_wsgi got to do its own child
-	 * initialisation but in daemon process we skip the
-	 * mod_python child initialisation so the active thread
-	 * state still exists. Thus need to do a bit of a fiddle
-	 * to ensure there is no active thread state.
+         * If mod_python is also being loaded and thus it was
+         * responsible for initialising Python it can leave in
+         * place an active thread state. Under normal conditions
+         * this would be eliminated in Apache child process by
+         * the time that mod_wsgi got to do its own child
+         * initialisation but in daemon process we skip the
+         * mod_python child initialisation so the active thread
+         * state still exists. Thus need to do a bit of a fiddle
+         * to ensure there is no active thread state.
          */
 
         if (!wsgi_python_initialized) {
@@ -5185,15 +5220,15 @@ static int wsgi_start_daemons(apr_pool_t *p)
             if (!strcmp(apr_proc_mutex_name(entry->mutex), "sysvsem")) {
                 apr_os_proc_mutex_t ospmutex;
 #if !APR_HAVE_UNION_SEMUN
-                union semun { 
+                union semun {
                     long val;
                     struct semid_ds *buf;
                     unsigned short *array;
                 };
-#endif  
+#endif
                 union semun ick;
                 struct semid_ds buf;
-                
+
                 apr_os_proc_mutex_get(&ospmutex, entry->mutex);
                 buf.sem_perm.uid = entry->uid;
                 buf.sem_perm.gid = entry->gid;
@@ -5460,7 +5495,7 @@ static int wsgi_execute_remote(request_rec *r)
         return status;
 
     /* Send request details and subprocess environment. */
-        
+
     if ((rv = wsgi_send_request(r, config, daemon)) != APR_SUCCESS) {
         ap_log_rerror(APLOG_MARK, APLOG_ERR, rv, r,
                      "mod_wsgi (pid=%d): Unable to send request details "
@@ -5528,9 +5563,9 @@ static int wsgi_execute_remote(request_rec *r)
             apr_bucket_read(bucket, &data, &len, APR_BLOCK_READ);
 
             /*
-	     * Keep writing data to the child until done or too
-	     * much time elapses with no progress or an error
-	     * occurs. (XXX Does a timeout actually occur?)
+             * Keep writing data to the child until done or too
+             * much time elapses with no progress or an error
+             * occurs. (XXX Does a timeout actually occur?)
              */
             rv = apr_file_write_full(tempsock, data, len, NULL);
 
@@ -5665,7 +5700,7 @@ static apr_status_t wsgi_read_request(int sockfd, request_rec *r)
 
 static ap_filter_rec_t *wsgi_header_filter_handle;
 
-apr_status_t wsgi_header_filter(ap_filter_t *f, apr_bucket_brigade *b)   
+apr_status_t wsgi_header_filter(ap_filter_t *f, apr_bucket_brigade *b)
 {
     request_rec *r = f->r;
 
@@ -5761,6 +5796,9 @@ static int wsgi_hook_daemon_handler(conn_rec *c)
     apr_pool_t *p;
     apr_status_t rv;
 
+    char *key;
+    apr_sockaddr_t *addr;
+
     WSGIRequestConfig *config;
 
     apr_bucket *e;
@@ -5779,10 +5817,10 @@ static int wsgi_hook_daemon_handler(conn_rec *c)
     r->pool = p;
     r->connection = c;
     r->server = c->base_server;
-    
+
     r->user = NULL;
     r->ap_auth_type = NULL;
-    
+
     r->allowed_methods = ap_make_method_list(p, 2);
 
     r->headers_in = apr_table_make(r->pool, 25);
@@ -5790,7 +5828,7 @@ static int wsgi_hook_daemon_handler(conn_rec *c)
     r->headers_out = apr_table_make(r->pool, 12);
     r->err_headers_out = apr_table_make(r->pool, 5);
     r->notes = apr_table_make(r->pool, 5);
-    
+
     r->request_config  = ap_create_request_config(r->pool);
 
     r->proto_output_filters = c->output_filters;
@@ -5849,14 +5887,37 @@ static int wsgi_hook_daemon_handler(conn_rec *c)
 
     apr_stat(&r->finfo, r->filename, APR_FINFO_SIZE, r->pool);
 
-    /* Set details of the remote client and calculate virtual host. */
+    /*
+     * Trigger mapping of host information to server configuration
+     * so that when logging errors they go to the correct error log
+     * file for the host.
+     */
 
     r->connection->remote_ip = (char *)apr_table_get(r->subprocess_env,
                                                      "REMOTE_ADDR");
 
-    /* XXX Still need to work out how to fake this. */
-    /* ap_update_vhost_given_ip(r->connection) */
-    /* ap_update_vhost_from_headers(r); */
+    key = apr_psprintf(p, "%s|%s",
+                       apr_table_get(r->subprocess_env,
+                                     "mod_wsgi.listener_host"),
+                       apr_table_get(r->subprocess_env,
+                                     "mod_wsgi.listener_port"));
+
+    addr = (apr_sockaddr_t *)apr_hash_get(wsgi_daemon_listeners,
+                                          key, APR_HASH_KEY_STRING);
+
+    if (addr)
+        c->local_addr = addr;
+
+    ap_update_vhost_given_ip(r->connection);
+
+    r->server = c->base_server;
+
+    if (apr_table_get(r->subprocess_env, "HTTP_HOST")) {
+        apr_table_setn(r->headers_in, "Host",
+                       apr_table_get(r->subprocess_env, "HTTP_HOST"));
+    }
+
+    ap_update_vhost_from_headers(r);
 
     /*
      * Set content length of any request content and add the
