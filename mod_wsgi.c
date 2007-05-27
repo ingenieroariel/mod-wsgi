@@ -72,9 +72,9 @@ typedef time_t apr_time_t;
 #include "apr_strings.h"
 #include "http_config.h"
 #include "ap_listen.h"
+#include "apr_version.h"
 #endif
 
-#include "apr_version.h"
 #include "ap_config.h"
 #include "http_core.h"
 #include "http_log.h"
@@ -4174,10 +4174,12 @@ static void wsgi_build_environment(request_rec *r)
     apr_table_setn(r->subprocess_env, "mod_wsgi.output_buffering",
                    apr_psprintf(r->pool, "%d", config->output_buffering));
 
+#if defined(MOD_WSGI_WITH_DAEMONS)
     apr_table_setn(r->subprocess_env, "mod_wsgi.listener_host",
                    c->local_addr->hostname ? c->local_addr->hostname : "");
     apr_table_setn(r->subprocess_env, "mod_wsgi.listener_port",
                    apr_psprintf(r->pool, "%d", c->local_addr->port));
+#endif
 }
 
 static int wsgi_is_script_aliased(request_rec *r)
@@ -4509,8 +4511,8 @@ static apr_hash_t *wsgi_daemon_listeners = NULL;
 
 static int wsgi_daemon_shutdown = 0;
 
-static const char *wsgi_add_start_daemon(cmd_parms *cmd, void *mconfig,
-                                         const char *args)
+static const char *wsgi_add_daemon_process(cmd_parms *cmd, void *mconfig,
+                                           const char *args)
 {
     const char *error = NULL;
     WSGIServerConfig *config = NULL;
@@ -6111,7 +6113,7 @@ static const command_rec wsgi_commands[] =
         RSRC_CONF, "Map location pattern to target WSGI script file."),
 
 #if defined(MOD_WSGI_WITH_DAEMONS)
-    AP_INIT_RAW_ARGS("WSGIStartDaemon", wsgi_add_start_daemon, NULL,
+    AP_INIT_RAW_ARGS("WSGIDaemonProcess", wsgi_add_daemon_process, NULL,
         RSRC_CONF, "Specify details of daemon processes to start."),
     AP_INIT_TAKE1("WSGISocketPrefix", wsgi_set_socket_prefix, NULL,
         RSRC_CONF, "Path prefix for the daemon process sockets."),
