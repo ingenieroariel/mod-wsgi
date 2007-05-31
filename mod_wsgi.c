@@ -1779,6 +1779,7 @@ static PyObject *Adapter_start(AdapterObject *self, PyObject *args)
 
     value = ap_getword(self->r->pool, &status, ' ');
 
+    errno = 0;
     self->status = strtol(value, &value, 10);
 
     if (*value || errno == ERANGE) {
@@ -1848,8 +1849,9 @@ static int Adapter_output(AdapterObject *self,
                 char *v = value;
                 long l = 0;
 
+                errno = 0;
                 l = strtol(v, &v, 10);
-                if (*v) {
+                if (*v || errno == ERANGE) {
                     PyErr_SetString(PyExc_TypeError, "invalid content length");
                     return 0;
                 }
