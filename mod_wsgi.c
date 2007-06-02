@@ -1118,6 +1118,11 @@ static void Input_dealloc(InputObject *self)
 
 static PyObject *Input_close(InputObject *self, PyObject *args)
 {
+    if (!self->r) {
+        PyErr_SetString(PyExc_RuntimeError, "request object has expired");
+        return NULL;
+    }
+
     if (!PyArg_ParseTuple(args, ":close"))
         return NULL;
 
@@ -1135,6 +1140,11 @@ static PyObject *Input_read(InputObject *self, PyObject *args)
     apr_size_t length = 0;
 
     apr_size_t n;
+
+    if (!self->r) {
+        PyErr_SetString(PyExc_RuntimeError, "request object has expired");
+        return NULL;
+    }
 
     if (!PyArg_ParseTuple(args, "|l:read", &size))
         return NULL;
@@ -1270,6 +1280,11 @@ static PyObject *Input_readline(InputObject *self, PyObject *args)
     apr_size_t length = 0;
 
     apr_size_t n;
+
+    if (!self->r) {
+        PyErr_SetString(PyExc_RuntimeError, "request object has expired");
+        return NULL;
+    }
 
     if (!PyArg_ParseTuple(args, "|l:readline", &size))
         return NULL;
@@ -1557,6 +1572,11 @@ static PyObject *Input_readlines(InputObject *self, PyObject *args)
     PyObject *line = NULL;
     PyObject *rlargs = NULL;
 
+    if (!self->r) {
+        PyErr_SetString(PyExc_RuntimeError, "request object has expired");
+        return NULL;
+    }
+
     if (!PyArg_ParseTuple(args, "|l:readlines", &hint))
         return NULL;
 
@@ -1613,6 +1633,11 @@ static PyMethodDef Input_methods[] = {
 
 static PyObject *Input_iter(InputObject *self)
 {
+    if (!self->r) {
+        PyErr_SetString(PyExc_RuntimeError, "request object has expired");
+        return NULL;
+    }
+
     Py_INCREF(self);
     return (PyObject *)self;
 }
@@ -1621,6 +1646,11 @@ static PyObject *Input_iternext(InputObject *self)
 {
     PyObject *line = NULL;
     PyObject *rlargs = NULL;
+
+    if (!self->r) {
+        PyErr_SetString(PyExc_RuntimeError, "request object has expired");
+        return NULL;
+    }
 
     rlargs = PyTuple_New(0);
 
@@ -1694,6 +1724,7 @@ typedef struct {
         PyObject_HEAD
         request_rec *r;
         WSGIRequestConfig *config;
+        InputObject *input;
         int status;
         const char *status_line;
         PyObject *headers;
@@ -1721,6 +1752,8 @@ static AdapterObject *newAdapterObject(request_rec *r, PyObject *log)
     self->headers = NULL;
     self->sequence = NULL;
 
+    self->input = newInputObject(r);
+
     self->log = log;
     Py_INCREF(self->log);
 
@@ -1731,6 +1764,8 @@ static void Adapter_dealloc(AdapterObject *self)
 {
     Py_XDECREF(self->headers);
     Py_XDECREF(self->sequence);
+
+    Py_DECREF(self->input);
 
     Py_DECREF(self->log);
 
@@ -1744,6 +1779,11 @@ static PyObject *Adapter_start(AdapterObject *self, PyObject *args)
     PyObject *exc_info = NULL;
 
     char* value = NULL;
+
+    if (!self->r) {
+        PyErr_SetString(PyExc_RuntimeError, "request object has expired");
+        return NULL;
+    }
 
     if (!PyArg_ParseTuple(args, "sO|O:start_response",
         &status, &headers, &exc_info)) {
@@ -1800,8 +1840,7 @@ static PyObject *Adapter_start(AdapterObject *self, PyObject *args)
     return PyObject_GetAttrString((PyObject *)self, "write");
 }
 
-static int Adapter_output(AdapterObject *self,
-                                  const char *data, int length)
+static int Adapter_output(AdapterObject *self, const char *data, int length)
 {
     int i = 0;
     char *name = NULL;
@@ -1981,9 +2020,8 @@ static PyObject *Adapter_environ(AdapterObject *self)
 
     /* Setup input object for request content. */
 
-    object = (PyObject *)newInputObject(r);
+    object = (PyObject *)self->input;
     PyDict_SetItemString(environ, "wsgi.input", object);
-    Py_DECREF(object);
 
     return environ;
 }
@@ -2074,6 +2112,11 @@ static PyObject *Adapter_write(AdapterObject *self, PyObject *args)
 {
     const char *data = NULL;
     int length = 0;
+
+    if (!self->r) {
+        PyErr_SetString(PyExc_RuntimeError, "request object has expired");
+        return NULL;
+    }
 
     if (!PyArg_ParseTuple(args, "s#:write", &data, &length))
         return NULL;
@@ -3452,8 +3495,20 @@ static int wsgi_execute_script(request_rec *r)
 
             Py_INCREF(object);
 
-            if (adapter)
+            if (adapter) {
                 status = Adapter_run(adapter, object);
+
+                /*
+		 * Wipe out references to Apache request object
+		 * held by Python objects, so can detect when an
+		 * application holds on to the transient Python
+		 * objects beyond the life of the request and
+		 * thus raise an exception if they are used.
+                 */
+
+                adapter->r = NULL;
+                adapter->input->r = NULL;
+            }
 
             Py_XDECREF((PyObject *)adapter);
 
@@ -3493,6 +3548,18 @@ static int wsgi_execute_script(request_rec *r)
 
     if (PyErr_Occurred())
         wsgi_log_python_error(r, log);
+
+    /*
+     * Wipe out reference to Apache request object held
+     * by log object. If application holds onto the log
+     * object, any output written to it will then go to
+     * main server log and no attempt will be made to
+     * write it to log associated with the request thereby
+     * avoiding a crash given that request object will no
+     * longer exist.
+     */
+
+    ((LogObject *)log)->r = NULL;
 
     /* Cleanup and release interpreter, */
 
