@@ -976,8 +976,7 @@ static PyObject *Log_write(LogObject *self, PyObject *args)
     if (!PyArg_ParseTuple(args, "s:write", &msg))
         return NULL;
 
-    if (*msg)
-        Log_output(self, msg);
+    Log_output(self, msg);
 
     Py_INCREF(Py_None);
     return Py_None;
