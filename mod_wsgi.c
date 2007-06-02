@@ -727,6 +727,7 @@ void wsgi_log_python_error(request_rec *r, PyObject *log)
     }
 
     PyErr_Fetch(&type, &value, &traceback);
+    PyErr_NormalizeException(&type, &value, &traceback);
 
     if (!value) {
         value = Py_None;
@@ -2616,6 +2617,7 @@ static void Interpreter_dealloc(InterpreterObject *self)
 #endif
 
                 PyErr_Fetch(&type, &value, &traceback);
+                PyErr_NormalizeException(&type, &value, &traceback);
 
                 if (!value) {
                     value = Py_None;
@@ -2736,6 +2738,7 @@ static void Interpreter_dealloc(InterpreterObject *self)
             }
 
             PyErr_Fetch(&type, &value, &traceback);
+            PyErr_NormalizeException(&type, &value, &traceback);
 
             if (!value) {
                 value = Py_None;
