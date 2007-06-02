@@ -3763,7 +3763,13 @@ static const char *wsgi_set_restrict_stdin(cmd_parms *cmd, void *mconfig,
         return error;
 
     sconfig = ap_get_module_config(cmd->server->module_config, &wsgi_module);
-    sconfig->restrict_stdin = !!strcasecmp(f, "Off");
+
+    if (strcasecmp(f, "Off") == 0)
+        sconfig->restrict_stdin = 0;
+    else if (strcasecmp(f, "On") == 0)
+        sconfig->restrict_stdin = 1;
+    else
+        return "WSGIRestrictStdin must be one of: Off | On";
 
     return NULL;
 }
@@ -3779,7 +3785,13 @@ static const char *wsgi_set_restrict_stdout(cmd_parms *cmd, void *mconfig,
         return error;
 
     sconfig = ap_get_module_config(cmd->server->module_config, &wsgi_module);
-    sconfig->restrict_stdout = !!strcasecmp(f, "Off");
+
+    if (strcasecmp(f, "Off") == 0)
+        sconfig->restrict_stdout = 0;
+    else if (strcasecmp(f, "On") == 0)
+        sconfig->restrict_stdout = 1;
+    else
+        return "WSGIRestrictStdout must be one of: Off | On";
 
     return NULL;
 }
@@ -3795,7 +3807,13 @@ static const char *wsgi_set_restrict_signal(cmd_parms *cmd, void *mconfig,
         return error;
 
     sconfig = ap_get_module_config(cmd->server->module_config, &wsgi_module);
-    sconfig->restrict_signal = !!strcasecmp(f, "Off");
+
+    if (strcasecmp(f, "Off") == 0)
+        sconfig->restrict_signal = 0;
+    else if (strcasecmp(f, "On") == 0)
+        sconfig->restrict_signal = 1;
+    else
+        return "WSGIRestrictSignal must be one of: Off | On";
 
     return NULL;
 }
@@ -3860,13 +3878,25 @@ static const char *wsgi_set_pass_authorization(cmd_parms *cmd, void *mconfig,
     if (cmd->path) {
         WSGIDirectoryConfig *dconfig = NULL;
         dconfig = (WSGIDirectoryConfig *)mconfig;
-        dconfig->pass_authorization = !strcasecmp(f, "On");
+
+        if (strcasecmp(f, "Off") == 0)
+            dconfig->pass_authorization = 0;
+        else if (strcasecmp(f, "On") == 0)
+            dconfig->pass_authorization = 1;
+        else
+            return "WSGIPassAuthorization must be one of: Off | On";
     }
     else {
         WSGIServerConfig *sconfig = NULL;
         sconfig = ap_get_module_config(cmd->server->module_config,
                                        &wsgi_module);
-        sconfig->pass_authorization = !strcasecmp(f, "On");
+
+        if (strcasecmp(f, "Off") == 0)
+            sconfig->pass_authorization = 0;
+        else if (strcasecmp(f, "On") == 0)
+            sconfig->pass_authorization = 1;
+        else
+            return "WSGIPassAuthorization must be one of: Off | On";
     }
 
     return NULL;
@@ -3878,13 +3908,25 @@ static const char *wsgi_set_script_reloading(cmd_parms *cmd, void *mconfig,
     if (cmd->path) {
         WSGIDirectoryConfig *dconfig = NULL;
         dconfig = (WSGIDirectoryConfig *)mconfig;
-        dconfig->script_reloading = !strcasecmp(f, "On");
+
+        if (strcasecmp(f, "Off") == 0)
+            dconfig->script_reloading = 0;
+        else if (strcasecmp(f, "On") == 0)
+            dconfig->script_reloading = 1;
+        else
+            return "WSGIScriptReloading must be one of: Off | On";
     }
     else {
         WSGIServerConfig *sconfig = NULL;
         sconfig = ap_get_module_config(cmd->server->module_config,
                                        &wsgi_module);
-        sconfig->script_reloading = !strcasecmp(f, "On");
+
+        if (strcasecmp(f, "Off") == 0)
+            sconfig->script_reloading = 0;
+        else if (strcasecmp(f, "On") == 0)
+            sconfig->script_reloading = 1;
+        else
+            return "WSGIScriptReloading must be one of: Off | On";
     }
 
     return NULL;
@@ -3896,19 +3938,25 @@ static const char *wsgi_set_reload_mechanism(cmd_parms *cmd, void *mconfig,
     if (cmd->path) {
         WSGIDirectoryConfig *dconfig = NULL;
         dconfig = (WSGIDirectoryConfig *)mconfig;
-        if (!strcasecmp(f, "Interpreter"))
+
+        if (strcasecmp(f, "Module") == 0)
+            dconfig->reload_mechanism = 0;
+        else if (strcasecmp(f, "Interpreter") == 0)
             dconfig->reload_mechanism = 1;
         else
-            dconfig->reload_mechanism = 0;
+            return "WSGIReloadMechanism must be one of: Module | Interpreter";
     }
     else {
         WSGIServerConfig *sconfig = NULL;
         sconfig = ap_get_module_config(cmd->server->module_config,
                                        &wsgi_module);
-        if (!strcasecmp(f, "Interpreter"))
+
+        if (strcasecmp(f, "Module") == 0)
+            sconfig->reload_mechanism = 0;
+        else if (strcasecmp(f, "Interpreter") == 0)
             sconfig->reload_mechanism = 1;
         else
-            sconfig->reload_mechanism = 0;
+            return "WSGIReloadMechanism must be one of: Module | Interpreter";
     }
 
     return NULL;
@@ -3920,13 +3968,25 @@ static const char *wsgi_set_output_buffering(cmd_parms *cmd, void *mconfig,
     if (cmd->path) {
         WSGIDirectoryConfig *dconfig = NULL;
         dconfig = (WSGIDirectoryConfig *)mconfig;
-        dconfig->output_buffering = !strcasecmp(f, "On");
+
+        if (strcasecmp(f, "Off") == 0)
+            dconfig->output_buffering = 0;
+        else if (strcasecmp(f, "On") == 0)
+            dconfig->output_buffering = 1;
+        else
+            return "WSGIOutputBuffering must be one of: Off | On";
     }
     else {
         WSGIServerConfig *sconfig = NULL;
         sconfig = ap_get_module_config(cmd->server->module_config,
                                        &wsgi_module);
-        sconfig->output_buffering = !strcasecmp(f, "On");
+
+        if (strcasecmp(f, "Off") == 0)
+            sconfig->output_buffering = 0;
+        else if (strcasecmp(f, "On") == 0)
+            sconfig->output_buffering = 1;
+        else
+            return "WSGIOutputBuffering must be one of: Off | On";
     }
 
     return NULL;
