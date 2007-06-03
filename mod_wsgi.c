@@ -2055,6 +2055,13 @@ static int Adapter_run(AdapterObject *self, PyObject *object)
             PyObject *item = NULL;
 
             while ((item = PyIter_Next(iterator))) {
+                if (!PyString_Check(item)) {
+                    PyErr_Format(PyExc_TypeError, "sequence of string "
+                                 "values expected, value of type %.200s found",
+                                 item->ob_type->tp_name);
+                    break;
+                }
+
                 msg = PyString_AsString(item);
                 length = PyString_Size(item);
 
@@ -2111,6 +2118,7 @@ static int Adapter_run(AdapterObject *self, PyObject *object)
 
 static PyObject *Adapter_write(AdapterObject *self, PyObject *args)
 {
+    PyObject *item = NULL;
     const char *data = NULL;
     int length = 0;
 
@@ -2119,8 +2127,11 @@ static PyObject *Adapter_write(AdapterObject *self, PyObject *args)
         return NULL;
     }
 
-    if (!PyArg_ParseTuple(args, "s#:write", &data, &length))
+    if (!PyArg_ParseTuple(args, "S:write", &item))
         return NULL;
+
+    data = PyString_AsString(item);
+    length = PyString_Size(item);
 
     if (!Adapter_output(self, data, length))
         return NULL;
