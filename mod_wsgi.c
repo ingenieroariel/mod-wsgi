@@ -1811,7 +1811,7 @@ static PyObject *Adapter_start(AdapterObject *self, PyObject *args)
         }
     }
     else if (self->status_line && !self->headers) {
-        PyErr_SetString(PyExc_TypeError, "headers have already been sent");
+        PyErr_SetString(PyExc_RuntimeError, "headers have already been sent");
         return NULL;
     }
 
@@ -1828,7 +1828,7 @@ static PyObject *Adapter_start(AdapterObject *self, PyObject *args)
     }
 
     if (!*status) {
-        PyErr_SetString(PyExc_TypeError, "status message was not supplied");
+        PyErr_SetString(PyExc_ValueError, "status message was not supplied");
         return NULL;
     }
 
@@ -1848,7 +1848,7 @@ static int Adapter_output(AdapterObject *self, const char *data, int length)
     char *value = NULL;
 
     if (!self->status_line) {
-        PyErr_SetString(PyExc_TypeError, "response has not been started");
+        PyErr_SetString(PyExc_RuntimeError, "response has not been started");
         return 0;
     }
 
@@ -1891,7 +1891,8 @@ static int Adapter_output(AdapterObject *self, const char *data, int length)
                 errno = 0;
                 l = strtol(v, &v, 10);
                 if (*v || errno == ERANGE) {
-                    PyErr_SetString(PyExc_TypeError, "invalid content length");
+                    PyErr_SetString(PyExc_ValueError,
+                                    "invalid content length");
                     return 0;
                 }
 
