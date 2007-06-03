@@ -170,6 +170,10 @@ module MODULE_VAR_EXPORT wsgi_module;
 module AP_MODULE_DECLARE_DATA wsgi_module;
 #endif
 
+/* Base server object. */
+
+static server_rec *wsgi_main_server = NULL;
+
 /* Process information. */
 
 static pid_t wsgi_parent_pid = 0;
@@ -685,110 +689,6 @@ static WSGIRequestConfig *wsgi_create_req_config(apr_pool_t *p, request_rec *r)
     return config;
 }
 
-/* Error reporting. */
-
-void wsgi_log_python_error(request_rec *r, PyObject *log)
-{
-    if (!PyErr_Occurred())
-        return;
-
-    PyObject *m = NULL;
-    PyObject *result = NULL;
-
-    PyObject *type = NULL;
-    PyObject *value = NULL;
-    PyObject *traceback = NULL;
-
-    if (PyErr_ExceptionMatches(PyExc_SystemExit)) {
-#if AP_SERVER_MAJORVERSION_NUMBER < 2
-        ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE,
-                     r, "mod_wsgi (pid=%d): SystemExit "
-                     "exception raised by WSGI script "
-                     "'%s' ignored.", getpid(), r->filename);
-#else
-        ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE,
-                     0, r, "mod_wsgi (pid=%d): SystemExit "
-                     "exception raised by WSGI script "
-                     "'%s' ignored.", getpid(), r->filename);
-#endif
-    }
-    else {
-#if AP_SERVER_MAJORVERSION_NUMBER < 2
-        ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE,
-                     r, "mod_wsgi (pid=%d): Exception "
-                     "occurred within WSGI script '%s'.",
-                     getpid(), r->filename);
-#else
-        ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE,
-                     0, r, "mod_wsgi (pid=%d): Exception "
-                     "occurred within WSGI script '%s'.",
-                     getpid(), r->filename);
-#endif
-    }
-
-    PyErr_Fetch(&type, &value, &traceback);
-    PyErr_NormalizeException(&type, &value, &traceback);
-
-    if (!value) {
-        value = Py_None;
-        Py_INCREF(value);
-    }
-
-    if (!traceback) {
-        traceback = Py_None;
-        Py_INCREF(traceback);
-    }
-
-    m = PyImport_ImportModule("traceback");
-
-    if (m) {
-        PyObject *d = NULL;
-        PyObject *o = NULL;
-        d = PyModule_GetDict(m);
-        o = PyDict_GetItemString(d, "print_exception");
-        if (o) {
-            PyObject *args = NULL;
-            Py_INCREF(o);
-            args = Py_BuildValue("(OOOOO)", type, value, traceback,
-                                 Py_None, log);
-            result = PyEval_CallObject(o, args);
-            Py_DECREF(args);
-        }
-        Py_DECREF(o);
-    }
-
-    if (!result) {
-        /*
-         * If can't output exception and traceback then
-         * use PyErr_Print to dump out details of the
-         * exception. For SystemExit though if we do
-         * that the process will actually be terminated
-         * so can only clear the exception information
-         * and keep going.
-         */
-
-        PyErr_Restore(type, value, traceback);
-
-        if (!PyErr_ExceptionMatches(PyExc_SystemExit)) {
-            PyErr_Print();
-            if (Py_FlushLine())
-                PyErr_Clear();
-        }
-        else {
-            PyErr_Clear();
-        }
-    }
-    else {
-        Py_XDECREF(type);
-        Py_XDECREF(value);
-        Py_XDECREF(traceback);
-    }
-
-    Py_XDECREF(result);
-
-    Py_XDECREF(m);
-}
-
 /* Class objects used by response handler. */
 
 typedef struct {
@@ -800,7 +700,7 @@ typedef struct {
 
 static PyTypeObject Log_Type;
 
-static LogObject *newLogObject(request_rec *r)
+static LogObject *newLogObject(request_rec *r, int level)
 {
     LogObject *self;
 
@@ -809,7 +709,7 @@ static LogObject *newLogObject(request_rec *r)
         return NULL;
 
     self->r = r;
-    self->level = APLOG_NOERRNO|APLOG_ERR;
+    self->level = APLOG_NOERRNO|level;
     self->s = NULL;
 
     return self;
@@ -827,9 +727,11 @@ static void Log_dealloc(LogObject *self)
         }
         else {
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
-            ap_log_error(APLOG_MARK, self->level, 0, "%s", self->s);
+            ap_log_error(APLOG_MARK, self->level, wsgi_main_server,
+                         "%s", self->s);
 #else
-            ap_log_error(APLOG_MARK, self->level, 0, 0, "%s", self->s);
+            ap_log_error(APLOG_MARK, self->level, 0, wsgi_main_server,
+                         "%s", self->s);
 #endif
         }
 
@@ -854,9 +756,11 @@ static PyObject *Log_flush(LogObject *self, PyObject *args)
         }
         else {
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
-            ap_log_error(APLOG_MARK, self->level, 0, "%s", self->s);
+            ap_log_error(APLOG_MARK, self->level, wsgi_main_server,
+                         "%s", self->s);
 #else
-            ap_log_error(APLOG_MARK, self->level, 0, 0, "%s", self->s);
+            ap_log_error(APLOG_MARK, self->level, 0, wsgi_main_server,
+                         "%s", self->s);
 #endif
         }
 
@@ -904,9 +808,11 @@ static void Log_output(LogObject *self, const char *msg)
             }
             else {
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
-                ap_log_error(APLOG_MARK, self->level, 0, "%s", s);
+                ap_log_error(APLOG_MARK, self->level, wsgi_main_server,
+                             "%s", s);
 #else
-                ap_log_error(APLOG_MARK, self->level, 0, 0, "%s", s);
+                ap_log_error(APLOG_MARK, self->level, 0, wsgi_main_server,
+                             "%s", s);
 #endif
             }
 
@@ -934,9 +840,11 @@ static void Log_output(LogObject *self, const char *msg)
             }
             else {
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
-                ap_log_error(APLOG_MARK, self->level, 0, "%s", s);
+                ap_log_error(APLOG_MARK, self->level, wsgi_main_server,
+                             "%s", s);
 #else
-                ap_log_error(APLOG_MARK, self->level, 0, 0, "%s", s);
+                ap_log_error(APLOG_MARK, self->level, 0, wsgi_main_server,
+                             "%s", s);
 #endif
             }
 
@@ -1075,6 +983,108 @@ static PyTypeObject Log_Type = {
     0,                      /*tp_free*/
     0,                      /*tp_is_gc*/
 };
+
+void wsgi_log_python_error(request_rec *r, LogObject *log)
+{
+    if (!PyErr_Occurred())
+        return;
+
+    PyObject *m = NULL;
+    PyObject *result = NULL;
+
+    PyObject *type = NULL;
+    PyObject *value = NULL;
+    PyObject *traceback = NULL;
+
+    if (PyErr_ExceptionMatches(PyExc_SystemExit)) {
+#if AP_SERVER_MAJORVERSION_NUMBER < 2
+        ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR,
+                     r, "mod_wsgi (pid=%d): SystemExit "
+                     "exception raised by WSGI script "
+                     "'%s' ignored.", getpid(), r->filename);
+#else
+        ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR,
+                     0, r, "mod_wsgi (pid=%d): SystemExit "
+                     "exception raised by WSGI script "
+                     "'%s' ignored.", getpid(), r->filename);
+#endif
+    }
+    else {
+#if AP_SERVER_MAJORVERSION_NUMBER < 2
+        ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR,
+                     r, "mod_wsgi (pid=%d): Exception "
+                     "occurred within WSGI script '%s'.",
+                     getpid(), r->filename);
+#else
+        ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR,
+                     0, r, "mod_wsgi (pid=%d): Exception "
+                     "occurred within WSGI script '%s'.",
+                     getpid(), r->filename);
+#endif
+    }
+
+    PyErr_Fetch(&type, &value, &traceback);
+    PyErr_NormalizeException(&type, &value, &traceback);
+
+    if (!value) {
+        value = Py_None;
+        Py_INCREF(value);
+    }
+
+    if (!traceback) {
+        traceback = Py_None;
+        Py_INCREF(traceback);
+    }
+
+    m = PyImport_ImportModule("traceback");
+
+    if (m) {
+        PyObject *d = NULL;
+        PyObject *o = NULL;
+        d = PyModule_GetDict(m);
+        o = PyDict_GetItemString(d, "print_exception");
+        if (o) {
+            PyObject *args = NULL;
+            Py_INCREF(o);
+            args = Py_BuildValue("(OOOOO)", type, value, traceback,
+                                 Py_None, log);
+            result = PyEval_CallObject(o, args);
+            Py_DECREF(args);
+        }
+        Py_DECREF(o);
+    }
+
+    if (!result) {
+        /*
+         * If can't output exception and traceback then
+         * use PyErr_Print to dump out details of the
+         * exception. For SystemExit though if we do
+         * that the process will actually be terminated
+         * so can only clear the exception information
+         * and keep going.
+         */
+
+        PyErr_Restore(type, value, traceback);
+
+        if (!PyErr_ExceptionMatches(PyExc_SystemExit)) {
+            PyErr_Print();
+            if (Py_FlushLine())
+                PyErr_Clear();
+        }
+        else {
+            PyErr_Clear();
+        }
+    }
+    else {
+        Py_XDECREF(type);
+        Py_XDECREF(value);
+        Py_XDECREF(traceback);
+    }
+
+    Py_XDECREF(result);
+
+    Py_XDECREF(m);
+}
 
 typedef struct {
         PyObject_HEAD
@@ -1726,16 +1736,16 @@ typedef struct {
         request_rec *r;
         WSGIRequestConfig *config;
         InputObject *input;
+        LogObject *log;
         int status;
         const char *status_line;
         PyObject *headers;
         PyObject *sequence;
-        PyObject *log;
 } AdapterObject;
 
 static PyTypeObject Adapter_Type;
 
-static AdapterObject *newAdapterObject(request_rec *r, PyObject *log)
+static AdapterObject *newAdapterObject(request_rec *r)
 {
     AdapterObject *self;
 
@@ -1754,9 +1764,7 @@ static AdapterObject *newAdapterObject(request_rec *r, PyObject *log)
     self->sequence = NULL;
 
     self->input = newInputObject(r);
-
-    self->log = log;
-    Py_INCREF(self->log);
+    self->log = newLogObject(r, APLOG_ERR);
 
     return self;
 }
@@ -1767,7 +1775,6 @@ static void Adapter_dealloc(AdapterObject *self)
     Py_XDECREF(self->sequence);
 
     Py_DECREF(self->input);
-
     Py_DECREF(self->log);
 
     PyObject_Del(self);
@@ -2054,7 +2061,7 @@ static PyObject *Adapter_environ(AdapterObject *self)
      * reference to log object as keep reference to it.
      */
 
-    object = self->log;
+    object = (PyObject *)self->log;
     PyDict_SetItemString(environ, "wsgi.errors", object);
 
     /* Setup input object for request content. */
@@ -2335,11 +2342,11 @@ static PyObject *wsgi_signal_intercept(PyObject *self, PyObject *args)
         return NULL;
 
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
-    ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0,
+    ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_WARNING, wsgi_main_server,
                  "mod_wsgi (pid=%d): Callback registration for "
                  "signal %d ignored.", getpid(), n);
 #else
-    ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, 0,
+    ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_WARNING, 0, wsgi_main_server,
                  "mod_wsgi (pid=%d): Callback registration for "
                  "signal %d ignored.", getpid(), n);
 #endif
@@ -2356,7 +2363,7 @@ static PyObject *wsgi_signal_intercept(PyObject *self, PyObject *args)
             PyObject *args = NULL;
             PyObject *result = NULL;
             Py_INCREF(o);
-            log = (PyObject *)newLogObject(NULL);
+            log = (PyObject *)newLogObject(NULL, APLOG_WARNING);
             args = Py_BuildValue("(OOO)", Py_None, Py_None, log);
             result = PyEval_CallObject(o, args);
             Py_XDECREF(result);
@@ -2418,11 +2425,11 @@ static InterpreterObject *newInterpreterObject(const char *name,
          */
 
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
-        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0,
+        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_INFO, wsgi_main_server,
                      "mod_wsgi (pid=%d): Attach interpreter '%s'.",
                      getpid(), name);
 #else
-        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, 0,
+        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_INFO, 0, wsgi_main_server,
                      "mod_wsgi (pid=%d): Attach interpreter '%s'.",
                      getpid(), name);
 #endif
@@ -2448,11 +2455,11 @@ static InterpreterObject *newInterpreterObject(const char *name,
          */
 
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
-        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0,
+        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_INFO, wsgi_main_server,
                      "mod_wsgi (pid=%d): Create interpreter '%s'.",
                      getpid(), name);
 #else
-        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, 0,
+        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_INFO, 0, wsgi_main_server,
                      "mod_wsgi (pid=%d): Create interpreter '%s'.",
                      getpid(), name);
 #endif
@@ -2492,7 +2499,7 @@ static InterpreterObject *newInterpreterObject(const char *name,
      * the 'pdb' module.
      */
 
-    object = (PyObject *)newLogObject(NULL);
+    object = (PyObject *)newLogObject(NULL, APLOG_ERR);
     PySys_SetObject("stderr", object);
     Py_DECREF(object);
 
@@ -2505,7 +2512,7 @@ static InterpreterObject *newInterpreterObject(const char *name,
             Py_DECREF(object);
         }
         else {
-            object = (PyObject *)newLogObject(NULL);
+            object = (PyObject *)newLogObject(NULL, APLOG_INFO);
             PySys_SetObject("stdout", object);
             Py_DECREF(object);
         }
@@ -2576,22 +2583,22 @@ static void Interpreter_dealloc(InterpreterObject *self)
 
     if (self->owner) {
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
-        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0,
+        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_INFO, wsgi_main_server,
                      "mod_wsgi (pid=%d): Destroy interpreter '%s'.",
                      getpid(), self->name);
 #else
-        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, 0,
+        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_INFO, 0, wsgi_main_server,
                      "mod_wsgi (pid=%d): Destroy interpreter '%s'.",
                      getpid(), self->name);
 #endif
     }
     else {
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
-        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0,
+        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_INFO, wsgi_main_server,
                      "mod_wsgi (pid=%d): Cleanup interpreter '%s'.",
                      getpid(), self->name);
 #else
-        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, 0,
+        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_INFO, 0, wsgi_main_server,
                      "mod_wsgi (pid=%d): Cleanup interpreter '%s'.",
                      getpid(), self->name);
 #endif
@@ -2664,15 +2671,15 @@ static void Interpreter_dealloc(InterpreterObject *self)
                 PyObject *traceback = NULL;
 
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
-                ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE,
-                             0, "mod_wsgi (pid=%d): Exception occurred "
-                             "within threading._shutdown().",
-                             getpid());
+                ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR,
+                             wsgi_main_server, "mod_wsgi (pid=%d): "
+                             "Exception occurred within "
+                             "threading._shutdown().", getpid());
 #else
-                ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE,
-                             0, 0, "mod_wsgi (pid=%d): Exception occurred "
-                             "within threading._shutdown().",
-                             getpid());
+                ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR, 0,
+                             wsgi_main_server, "mod_wsgi (pid=%d): "
+                             "Exception occurred within "
+                             "threading._shutdown().", getpid());
 #endif
 
                 PyErr_Fetch(&type, &value, &traceback);
@@ -2699,7 +2706,7 @@ static void Interpreter_dealloc(InterpreterObject *self)
                         PyObject *log = NULL;
                         PyObject *args = NULL;
                         Py_INCREF(o);
-                        log = (PyObject *)newLogObject(NULL);
+                        log = (PyObject *)newLogObject(NULL, APLOG_ERR);
                         args = Py_BuildValue("(OOOOO)", type, value,
                                              traceback, Py_None, log);
                         result = PyEval_CallObject(o, args);
@@ -2771,27 +2778,27 @@ static void Interpreter_dealloc(InterpreterObject *self)
 
             if (PyErr_ExceptionMatches(PyExc_SystemExit)) {
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
-                ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE,
-                             0, "mod_wsgi (pid=%d): SystemExit "
-                             "exception raised by sys.exitfunc() "
+                ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR,
+                             wsgi_main_server, "mod_wsgi (pid=%d): "
+                             "SystemExit exception raised by sys.exitfunc() "
                              "ignored.", getpid());
 #else
-                ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE,
-                             0, 0, "mod_wsgi (pid=%d): SystemExit "
-                             "exception raised by sys.exitfunc() "
+                ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR, 0,
+                             wsgi_main_server, "mod_wsgi (pid=%d): "
+                             "SystemExit exception raised by sys.exitfunc() "
                              "ignored.", getpid());
 #endif
             }
             else {
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
-                ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE,
-                             0, "mod_wsgi (pid=%d): Exception "
-                             "occurred within sys.exitfunc().",
+                ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR,
+                             wsgi_main_server, "mod_wsgi (pid=%d): "
+                             "Exception occurred within sys.exitfunc().",
                              getpid());
 #else
-                ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE,
-                             0, 0, "mod_wsgi (pid=%d): Exception "
-                             "occurred within sys.exitfunc().",
+                ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR, 0,
+                             wsgi_main_server, "mod_wsgi (pid=%d): "
+                             "Exception occurred within sys.exitfunc().",
                              getpid());
 #endif
             }
@@ -2820,7 +2827,7 @@ static void Interpreter_dealloc(InterpreterObject *self)
                     PyObject *log = NULL;
                     PyObject *args = NULL;
                     Py_INCREF(o);
-                    log = (PyObject *)newLogObject(NULL);
+                    log = (PyObject *)newLogObject(NULL, APLOG_ERR);
                     args = Py_BuildValue("(OOOOO)", type, value,
                                          traceback, Py_None, log);
                     result = PyEval_CallObject(o, args);
@@ -2961,20 +2968,22 @@ static void wsgi_python_version(void)
 
     if (strcmp(compile, dynamic) != 0) {
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
-        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0,
+        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_WARNING, wsgi_main_server,
                      "mod_wsgi: Compiled for Python/%s.", compile);
-        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0,
+        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_WARNING, wsgi_main_server,
                      "mod_wsgi: Runtime using Python/%s.", dynamic);
-        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0,
+        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_WARNING, wsgi_main_server,
                      "mod_wsgi: Python module path '%s'.",
                      Py_GetPath());
 #else
-        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, 0,
-                     "mod_wsgi: Compiled for Python/%s.", compile);
-        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, 0,
-                     "mod_wsgi: Runtime using Python/%s.", dynamic);
-        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, 0,
-                     "mod_wsgi: Python module path '%s'.",
+        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_WARNING, 0,
+                     wsgi_main_server, "mod_wsgi: Compiled for Python/%s.",
+                     compile);
+        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_WARNING, 0,
+                     wsgi_main_server, "mod_wsgi: Runtime using Python/%s.",
+                     dynamic);
+        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_WARNING, 0,
+                     wsgi_main_server, "mod_wsgi: Python module path '%s'.",
                      Py_GetPath());
 #endif
     }
@@ -2986,11 +2995,11 @@ static apr_status_t wsgi_python_term(void *data)
     PyThreadState *tstate = NULL;
 
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
-    ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0,
+    ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_INFO, wsgi_main_server,
                  "mod_wsgi (pid=%d): Terminating Python.",
                  getpid());
 #else
-    ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, 0,
+    ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_INFO, 0, wsgi_main_server,
                  "mod_wsgi (pid=%d): Terminating Python.",
                  getpid());
 #endif
@@ -3062,10 +3071,10 @@ static void wsgi_python_init(apr_pool_t *p)
         /* Initialise Python. */
 
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
-        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0,
+        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_INFO, wsgi_main_server,
                      "mod_wsgi: Initializing Python.");
 #else
-        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, 0,
+        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_INFO, 0, wsgi_main_server,
                      "mod_wsgi: Initializing Python.");
 #endif
 
@@ -3266,13 +3275,13 @@ static PyObject *wsgi_load_source(request_rec *r, const char *name, int found)
 
     if (found) {
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
-        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0,
+        ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_INFO, r,
                      "mod_wsgi (pid=%d, process='%s', application='%s'): "
                      "Reloading WSGI script '%s'.", getpid(),
                      config->process_group, config->application_group,
                      r->filename);
 #else
-        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, 0,
+        ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_INFO, 0, r,
                      "mod_wsgi (pid=%d, process='%s', application='%s'): "
                      "Reloading WSGI script '%s'.", getpid(),
                      config->process_group, config->application_group,
@@ -3281,13 +3290,13 @@ static PyObject *wsgi_load_source(request_rec *r, const char *name, int found)
     }
     else {
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
-        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0,
+        ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_INFO, r,
                      "mod_wsgi (pid=%d, process='%s', application='%s'): "
                      "Loading WSGI script '%s'.", getpid(),
                      config->process_group, config->application_group,
                      r->filename);
 #else
-        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, 0,
+        ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_INFO, 0, r,
                      "mod_wsgi (pid=%d, process='%s', application='%s'): "
                      "Loading WSGI script '%s'.", getpid(),
                      config->process_group, config->application_group,
@@ -3375,7 +3384,6 @@ static int wsgi_execute_script(request_rec *r)
     InterpreterObject *interp = NULL;
     PyObject *modules = NULL;
     PyObject *module = NULL;
-    PyObject *log = NULL;
     char *name = NULL;
     int found = 0;
 
@@ -3395,11 +3403,11 @@ static int wsgi_execute_script(request_rec *r)
 
     if (!interp) {
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
-        ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, r,
+        ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_CRIT, r,
                      "mod_wsgi (pid=%d): Cannot acquire interpreter '%s'.",
                      getpid(), config->application_group);
 #else
-        ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, r,
+        ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_CRIT, 0, r,
                      "mod_wsgi (pid=%d): Cannot acquire interpreter '%s'.",
                      getpid(), config->application_group);
 #endif
@@ -3460,6 +3468,18 @@ static int wsgi_execute_script(request_rec *r)
             /* Check for interpreter or module reloading. */
 
             if (config->reload_mechanism == 1 && *config->application_group) {
+#if AP_SERVER_MAJORVERSION_NUMBER < 2
+                ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_INFO, r,
+                             "mod_wsgi (pid=%d): Force reload of "
+                             "interpreter '%s'.", getpid(),
+                             config->application_group);
+#else
+                ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_INFO, 0, r,
+                             "mod_wsgi (pid=%d): Force reload of "
+                             "interpreter '%s'.", getpid(),
+                             config->application_group);
+#endif
+
                 /* Remove interpreter from set of interpreters. */
 
                 wsgi_remove_interpreter(config->application_group);
@@ -3487,12 +3507,12 @@ static int wsgi_execute_script(request_rec *r)
 
                 if (!interp) {
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
-                    ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, r,
+                    ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_CRIT, r,
                                  "mod_wsgi (pid=%d): Cannot acquire "
                                  "interpreter '%s'.", getpid(),
                                  config->application_group);
 #else
-                    ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, r,
+                    ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_CRIT, 0, r,
                                  "mod_wsgi (pid=%d): Cannot acquire "
                                  "interpreter '%s'.", getpid(),
                                  config->application_group);
@@ -3534,14 +3554,6 @@ static int wsgi_execute_script(request_rec *r)
 
     status = HTTP_INTERNAL_SERVER_ERROR;
 
-    /*
-     * Construct a log object to be used for the request or for
-     * dumping out any exception details if couldn't load the
-     * module or run the script.
-     */
-
-    log = (PyObject *)newLogObject(r);
-
     /* Determine if script is executable and execute it. */
 
     if (module) {
@@ -3553,7 +3565,7 @@ static int wsgi_execute_script(request_rec *r)
 
         if (object) {
             AdapterObject *adapter = NULL;
-            adapter = newAdapterObject(r, log);
+            adapter = newAdapterObject(r);
 
             Py_INCREF(object);
 
@@ -3570,6 +3582,7 @@ static int wsgi_execute_script(request_rec *r)
 
                 adapter->r = NULL;
                 adapter->input->r = NULL;
+                adapter->log->r = NULL;
             }
 
             Py_XDECREF((PyObject *)adapter);
@@ -3578,13 +3591,13 @@ static int wsgi_execute_script(request_rec *r)
         }
         else {
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
-            ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, r,
+            ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR, r,
                           "mod_wsgi (pid=%d): Target WSGI script '%s' does "
                           "not contain WSGI application '%s'.",
                           getpid(), r->filename, apr_pstrcat(r->pool,
                           r->filename, "::", config->callable_object, NULL));
 #else
-            ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, r,
+            ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR, 0, r,
                           "mod_wsgi (pid=%d): Target WSGI script '%s' does "
                           "not contain WSGI application '%s'.",
                           getpid(), r->filename, apr_pstrcat(r->pool,
@@ -3596,11 +3609,11 @@ static int wsgi_execute_script(request_rec *r)
     }
     else {
 #if AP_SERVER_MAJORVERSION_NUMBER < 2
-        ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, r,
+        ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR, r,
                       "mod_wsgi (pid=%d): Target WSGI script '%s' cannot "
                       "be loaded as Python module.", getpid(), r->filename);
 #else
-        ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, r,
+        ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR, 0, r,
                       "mod_wsgi (pid=%d): Target WSGI script '%s' cannot "
                       "be loaded as Python module.", getpid(), r->filename);
 #endif
@@ -3608,25 +3621,16 @@ static int wsgi_execute_script(request_rec *r)
 
     /* Log any details of exceptions if execution failed. */
 
-    if (PyErr_Occurred())
+    if (PyErr_Occurred()) {
+        LogObject *log;
+        log = newLogObject(r, APLOG_ERR);
         wsgi_log_python_error(r, log);
-
-    /*
-     * Wipe out reference to Apache request object held
-     * by log object. If application holds onto the log
-     * object, any output written to it will then go to
-     * main server log and no attempt will be made to
-     * write it to log associated with the request thereby
-     * avoiding a crash given that request object will no
-     * longer exist.
-     */
-
-    ((LogObject *)log)->r = NULL;
+        Py_DECREF(log);
+    }
 
     /* Cleanup and release interpreter, */
 
     Py_XDECREF(module);
-    Py_DECREF(log);
 
     wsgi_release_interpreter(interp);
 
@@ -4521,6 +4525,10 @@ void wsgi_hook_init(server_rec *s, apr_pool_t *p)
 
     ap_add_version_component(package);
 
+    /* Retain reference to base server. */
+
+    wsgi_main_server = s;
+
     /* Retain record of parent process ID. */
 
     wsgi_parent_pid = getpid();
@@ -4899,10 +4907,10 @@ static void wsgi_manage_process(int reason, void *data, apr_wait_t status)
             }
 
             if (!stopping) {
-                ap_log_error(APLOG_MARK, APLOG_ERR, 0, daemon->group->server,
-                             "mod_wsgi (pid=%d): Process '%s' has died, "
-                             "restarting.", daemon->process.pid,
-                             daemon->group->name);
+                ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_INFO, 0,
+                             daemon->group->server, "mod_wsgi (pid=%d): "
+                             "Process '%s' has died, restarting.",
+                             daemon->process.pid, daemon->group->name);
 
                 wsgi_start_process(wsgi_parent_pool, daemon);
             }
@@ -4953,10 +4961,10 @@ static void wsgi_manage_process(int reason, void *data, apr_wait_t status)
 
             /* Restart the child daemon process that has died. */
 
-            ap_log_error(APLOG_MARK, APLOG_ERR, 0, daemon->group->server,
-                         "mod_wsgi (pid=%d): Process '%s' has died, "
-                         "restarting.", daemon->process.pid,
-                         daemon->group->name);
+            ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_INFO, 0,
+                         daemon->group->server, "mod_wsgi (pid=%d): "
+                         "Process '%s' has died, restarting.",
+                         daemon->process.pid, daemon->group->name);
 
             wsgi_start_process(wsgi_parent_pool, daemon);
 
@@ -5014,12 +5022,12 @@ static int wsgi_setup_socket(WSGIProcessGroup *process)
     mode_t omask;
     int rc;
 
-    ap_log_error(APLOG_MARK, APLOG_ERR, 0, process->server,
+    ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_DEBUG, 0, process->server,
                  "mod_wsgi (pid=%d): Socket for '%s' is '%s'.",
                  getpid(), process->name, process->socket);
 
     if ((sockfd = socket(AF_UNIX, SOCK_STREAM, 0)) < 0) {
-        ap_log_error(APLOG_MARK, APLOG_ERR, errno, process->server,
+        ap_log_error(APLOG_MARK, APLOG_ALERT, errno, process->server,
                      "mod_wsgi (pid=%d): Couldn't create unix domain "
                      "socket.", getpid());
         return -1;
@@ -5033,14 +5041,14 @@ static int wsgi_setup_socket(WSGIProcessGroup *process)
     rc = bind(sockfd, (struct sockaddr *)&addr, sizeof(addr));
     umask(omask);
     if (rc < 0) {
-        ap_log_error(APLOG_MARK, APLOG_ERR, errno, process->server,
+        ap_log_error(APLOG_MARK, APLOG_ALERT, errno, process->server,
                      "mod_wsgi (pid=%d): Couldn't bind unix domain "
                      "socket '%s'.", getpid(), process->socket);
         return -1;
     }
 
     if (listen(sockfd, WSGI_LISTEN_BACKLOG) < 0) {
-        ap_log_error(APLOG_MARK, APLOG_ERR, errno, process->server,
+        ap_log_error(APLOG_MARK, APLOG_ALERT, errno, process->server,
                      "mod_wsgi (pid=%d): Couldn't listen on unix domain "
                      "socket.", getpid());
         return -1;
@@ -5048,7 +5056,7 @@ static int wsgi_setup_socket(WSGIProcessGroup *process)
 
     if (!geteuid()) {
         if (chown(process->socket, unixd_config.user_id, -1) < 0) {
-            ap_log_error(APLOG_MARK, APLOG_ERR, errno, process->server,
+            ap_log_error(APLOG_MARK, APLOG_ALERT, errno, process->server,
                          "mod_wsgi (pid=%d): Couldn't change owner of unix "
                          "domain socket '%s'.", getpid(),
                          process->socket);
@@ -5096,7 +5104,7 @@ static void wsgi_daemon_main(apr_pool_t *p, WSGIDaemonProcess *daemon)
             rv = apr_proc_mutex_lock(daemon->group->mutex);
             if (rv != APR_SUCCESS) {
                 if (!wsgi_daemon_shutdown) {
-                    ap_log_error(APLOG_MARK, APLOG_ERR, rv,
+                    ap_log_error(APLOG_MARK, APLOG_CRIT, rv,
                                  daemon->group->server, "mod_wsgi (pid=%d): "
                                  "Couldn't acquire accept mutex '%s'.",
                                  getpid(), daemon->group->socket);
@@ -5115,7 +5123,7 @@ static void wsgi_daemon_main(apr_pool_t *p, WSGIDaemonProcess *daemon)
             rv = apr_proc_mutex_unlock(daemon->group->mutex);
             if (rv != APR_SUCCESS) {
                 if (!wsgi_daemon_shutdown) {
-                    ap_log_error(APLOG_MARK, APLOG_ERR, rv,
+                    ap_log_error(APLOG_MARK, APLOG_CRIT, rv,
                                  daemon->group->server, "mod_wsgi (pid=%d): "
                                  "Couldn't release accept mutex '%s'.",
                                  getpid(), daemon->group->socket);
@@ -5145,13 +5153,13 @@ static int wsgi_start_process(apr_pool_t *p, WSGIDaemonProcess *daemon)
     ap_listen_rec *lr;
 
     if ((status = apr_proc_fork(&daemon->process, p)) < 0) {
-        ap_log_error(APLOG_MARK, APLOG_ERR, errno, daemon->group->server,
+        ap_log_error(APLOG_MARK, APLOG_ALERT, errno, daemon->group->server,
                      "mod_wsgi: Couldn't spawn process '%s'.",
                      daemon->group->name);
         return DECLINED;
     }
     else if (status == APR_INCHILD) {
-        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0,
+        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_INFO, 0,
                      daemon->group->server, "mod_wsgi (pid=%d): "
                      "Starting process '%s' with uid=%ld and gid=%u.",
                      getpid(), daemon->group->name, (long)daemon->group->uid,
@@ -5167,7 +5175,7 @@ static int wsgi_start_process(apr_pool_t *p, WSGIDaemonProcess *daemon)
         status = bindprocessor(BINDPROCESS, (int)getpid(),
                                PROCESSOR_CLASS_ANY);
         if (status != OK) {
-            ap_log_error(APLOG_MARK, APLOG_NOTICE, errno,
+            ap_log_error(APLOG_MARK, APLOG_ERR, errno,
                          daemon->group->server, "mod_wsgi (pid=%d): "
                          "Failed to unbind processor.", getpid());
         }
@@ -5184,7 +5192,7 @@ static int wsgi_start_process(apr_pool_t *p, WSGIDaemonProcess *daemon)
                                                daemon->group->mutex_path, p);
 
             if (status != APR_SUCCESS) {
-                ap_log_error(APLOG_MARK, APLOG_EMERG, 0, daemon->group->server,
+                ap_log_error(APLOG_MARK, APLOG_CRIT, 0, daemon->group->server,
                              "mod_wsgi (pid=%d): Couldn't intialise accept "
                              "mutex in daemon process '%s'.",
                              getpid(), daemon->group->mutex_path);
@@ -5304,9 +5312,10 @@ static int wsgi_start_process(apr_pool_t *p, WSGIDaemonProcess *daemon)
          * have the side affect of also destroying Python.
          */
 
-        ap_log_error(APLOG_MARK, APLOG_ERR, 0, daemon->group->server,
-                     "mod_wsgi (pid=%d): Stopping process '%s'.",
-                     getpid(), daemon->group->name);
+        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_INFO, 0,
+                     daemon->group->server, "mod_wsgi (pid=%d): "
+                     "Stopping process '%s'.", getpid(),
+                     daemon->group->name);
 
         apr_pool_destroy(wsgi_daemon_pool);
 
@@ -5393,7 +5402,7 @@ static int wsgi_start_daemons(apr_pool_t *p)
                                            ap_accept_lock_mech, p);
 
             if (status != APR_SUCCESS) {
-                ap_log_error(APLOG_MARK, APLOG_ERR, errno,
+                ap_log_error(APLOG_MARK, APLOG_CRIT, errno,
                              entry->server, "mod_wsgi (pid=%d): "
                              "Couldn't create accept lock '%s' (%d).",
                              getpid(), entry->mutex_path, ap_accept_lock_mech);
@@ -5427,7 +5436,7 @@ static int wsgi_start_daemons(apr_pool_t *p)
                 buf.sem_perm.mode = 0600;
                 ick.buf = &buf;
                 if (semctl(ospmutex.crossproc, 0, IPC_SET, ick) < 0) {
-                    ap_log_error(APLOG_MARK, APLOG_ERR, errno,
+                    ap_log_error(APLOG_MARK, APLOG_CRIT, errno,
                                  entry->server, "mod_wsgi (pid=%d): "
                                  "Couldn't set permissions on accept mutex "
                                  "'%s' (sysvsem).", getpid(),
@@ -5439,7 +5448,7 @@ static int wsgi_start_daemons(apr_pool_t *p)
 #if APR_HAS_FLOCK_SERIALIZE
             if (!strcmp(apr_proc_mutex_name(entry->mutex), "flock")) {
                 if (chown(entry->mutex_path, entry->uid, -1) < 0) {
-                    ap_log_error(APLOG_MARK, APLOG_ERR, errno,
+                    ap_log_error(APLOG_MARK, APLOG_CRIT, errno,
                                  entry->server, "mod_wsgi (pid=%d): "
                                  "Couldn't set permissions on accept mutex "
                                  "'%s' (flock).", getpid(),
@@ -5493,7 +5502,7 @@ static int wsgi_connect_daemon(request_rec *r, WSGIDaemonSocket *daemon)
         retries++;
 
         if ((daemon->fd = socket(AF_UNIX, SOCK_STREAM, 0)) < 0) {
-            ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, errno, r,
+            ap_log_rerror(APLOG_MARK, APLOG_ERR, errno, r,
                          "mod_wsgi (pid=%d): Unable to create socket to "
                          "connect to WSGI daemon process.", getpid());
 
@@ -5502,7 +5511,7 @@ static int wsgi_connect_daemon(request_rec *r, WSGIDaemonSocket *daemon)
 
         if (connect(daemon->fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
             if (errno == ECONNREFUSED && retries < WSGI_CONNECT_ATTEMPTS) {
-                ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, errno, r,
+                ap_log_rerror(APLOG_MARK, APLOG_ERR, errno, r,
                              "mod_wsgi (pid=%d): Connection attempt #%d to "
                              "WSGI daemon process '%s' on '%s' failed, "
                              "sleeping before retrying again.", getpid(),
@@ -5517,13 +5526,13 @@ static int wsgi_connect_daemon(request_rec *r, WSGIDaemonSocket *daemon)
                     timer *= 2;
             }
             else {
-                close(daemon->fd);
-
-                ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, errno, r,
+                ap_log_rerror(APLOG_MARK, APLOG_ERR, errno, r,
                              "mod_wsgi (pid=%d): Unable to connect to "
                              "WSGI daemon process '%s' on '%s' after "
                              "multiple attempts.", getpid(), daemon->name,
                              daemon->socket);
+
+                close(daemon->fd);
 
                 return HTTP_SERVICE_UNAVAILABLE;
             }
@@ -6065,8 +6074,9 @@ static int wsgi_hook_daemon_handler(conn_rec *c)
     /* Read in the request details and setup request object. */
 
     if ((rv = wsgi_read_request(sockfd, r)) != APR_SUCCESS) {
-        ap_log_error(APLOG_MARK, APLOG_CRIT, rv, 0, "mod_wsgi (pid=%d): "
-                     "Unable to read WSGI request.", getpid());
+        ap_log_rerror(APLOG_MARK, APLOG_CRIT, rv, r,
+                     "mod_wsgi (pid=%d): Unable to read WSGI request.",
+                     getpid());
 
         apr_pool_destroy(p);
 
@@ -6228,6 +6238,10 @@ static int wsgi_hook_init(apr_pool_t *pconf, apr_pool_t *ptemp,
             MOD_WSGI_MINORVERSION_NUMBER);
 
     ap_add_version_component(pconf, package);
+
+    /* Retain reference to base server. */
+
+    wsgi_main_server = s;
 
     /* Retain record of parent process ID. */
 
