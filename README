@@ -189,6 +189,22 @@ That "Python" is listed before "mod_wsgi" is indicative of the fact that
 when both modules are being loaded, mod_wsgi will leave it up to mod_python
 to initialise Python.
 
+Note that mod_wsgi logs various detailed information about interpreter
+creation, script loading and reloading etc, but it logs with log level of
+'info'. As the default for the Apache LogLevel directive is usually 'warn',
+such information will not be displayed in the Apache error log file. If you
+are new to mod_wsgi or need to debug issues with its use, it is recommended
+to change the Apache LogLevel directive to 'info' so that the information
+is displayed. For example:
+
+  LogLevel info
+
+If only wishing to enable this level of log information for a single
+VirtualHost this can be done by specifying the directive in the context of
+the VirtualHost container, but by doing so, only the more detailed
+information which is specific to a request against that virtual host will
+be output.
+
 
 Enabling WSGI Application
 =========================
