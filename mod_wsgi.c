@@ -4545,7 +4545,7 @@ static apr_pool_t *wsgi_parent_pool = NULL;
 static apr_pool_t *wsgi_daemon_pool = NULL;
 
 static int wsgi_daemon_count = 0;
-static apr_table_t *wsgi_daemon_sockets = NULL;
+static apr_hash_t *wsgi_daemon_index = NULL;
 static apr_hash_t *wsgi_daemon_listeners = NULL;
 
 static int wsgi_daemon_shutdown = 0;
@@ -5195,7 +5195,7 @@ static int wsgi_start_daemons(apr_pool_t *p)
      * for each of the named process groups.
      */
 
-    wsgi_daemon_sockets = apr_table_make(p, wsgi_daemon_count);
+    wsgi_daemon_index = apr_hash_make(p);
 
     entries = (WSGIProcessGroup *)wsgi_daemon_list->elts;
 
@@ -5213,7 +5213,8 @@ static int wsgi_start_daemons(apr_pool_t *p)
                                      wsgi_server_config->socket_prefix,
                                      ap_my_generation, entry->id);
 
-        apr_table_setn(wsgi_daemon_sockets, entry->name, entry->socket);
+        apr_hash_set(wsgi_daemon_index, entry->name, APR_HASH_KEY_STRING,
+                     entry);
 
         entry->listener_fd = wsgi_setup_socket(entry);
 
@@ -5511,8 +5512,29 @@ static int wsgi_execute_remote(request_rec *r)
 
     daemon->name = config->process_group;
 
-    if (wsgi_daemon_sockets)
-        daemon->socket = apr_table_get(wsgi_daemon_sockets, daemon->name);
+    if (wsgi_daemon_index) {
+        WSGIProcessGroup *entry = NULL;
+
+        entry = (WSGIProcessGroup *)apr_hash_get(wsgi_daemon_index,
+                                                 daemon->name,
+                                                 APR_HASH_KEY_STRING);
+
+        if (entry) {
+            if (entry->server != r->server && entry->server != wsgi_server) {
+                if (strcmp(entry->server->server_hostname,
+                           r->server->server_hostname) != 0) {
+                    wsgi_log_script_error(r, apr_psprintf(r->pool, "Daemon "
+                                          "process called '%s' cannot be "
+                                          "accessed by this WSGI application",
+                                          daemon->name), r->filename);
+
+                    return HTTP_INTERNAL_SERVER_ERROR;
+                }
+            }
+
+            daemon->socket = entry->socket;
+        }
+    }
 
     if (!daemon->socket) {
         wsgi_log_script_error(r, apr_psprintf(r->pool, "No WSGI daemon "
