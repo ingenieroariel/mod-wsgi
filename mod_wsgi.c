@@ -199,6 +199,10 @@ static pid_t wsgi_parent_pid = 0;
 static int wsgi_multiprocess = 1;
 static int wsgi_multithread = 1;
 
+/* Daemon process list. */
+
+apr_array_header_t *wsgi_daemon_list = NULL;
+
 /* Configuration objects. */
 
 typedef struct {
@@ -212,7 +216,6 @@ typedef struct {
 
     apr_array_header_t *alias_list;
 
-    apr_array_header_t *daemon_list;
     const char *socket_prefix;
 
     int python_optimize;
@@ -246,7 +249,6 @@ static WSGIServerConfig *newWSGIServerConfig(apr_pool_t *p)
 
     object->alias_list = NULL;
 
-    object->daemon_list = NULL;
     object->socket_prefix = NULL;
 
 #if defined(MOD_WSGI_WITH_DAEMONS)
@@ -985,15 +987,13 @@ void wsgi_log_python_error(request_rec *r, LogObject *log)
 
     if (PyErr_ExceptionMatches(PyExc_SystemExit)) {
         ap_log_rerror(APLOG_MARK, WSGI_LOG_ERR(0), r,
-                      "mod_wsgi (pid=%d): SystemExit "
-                      "exception raised by WSGI script "
-                      "'%s' ignored.", getpid(), r->filename);
+                      "mod_wsgi (pid=%d): SystemExit exception raised by "
+                      "WSGI script '%s' ignored.", getpid(), r->filename);
     }
     else {
         ap_log_rerror(APLOG_MARK, WSGI_LOG_ERR(0), r,
-                      "mod_wsgi (pid=%d): Exception "
-                      "occurred within WSGI script '%s'.",
-                      getpid(), r->filename);
+                      "mod_wsgi (pid=%d): Exception occurred within WSGI "
+                      "script '%s'.", getpid(), r->filename);
     }
 
     PyErr_Fetch(&type, &value, &traceback);
@@ -2467,7 +2467,7 @@ static InterpreterObject *newInterpreterObject(const char *name,
             Py_DECREF(object);
         }
         else {
-            object = (PyObject *)newLogObject(NULL, APLOG_INFO);
+            object = (PyObject *)newLogObject(NULL, APLOG_ERR);
             PySys_SetObject("stdout", object);
             Py_DECREF(object);
         }
@@ -2902,8 +2902,7 @@ static apr_status_t wsgi_python_term(void *data)
     PyThreadState *tstate = NULL;
 
     ap_log_error(APLOG_MARK, WSGI_LOG_INFO(0), wsgi_server,
-                 "mod_wsgi (pid=%d): Terminating Python.",
-                 getpid());
+                 "mod_wsgi (pid=%d): Terminating Python.", getpid());
 
     PyEval_AcquireLock();
 
@@ -4571,16 +4570,10 @@ static const char *wsgi_add_daemon_process(cmd_parms *cmd, void *mconfig,
     const char *option = NULL;
     const char *value = NULL;
 
-    apr_array_header_t *daemons = NULL;
-
     WSGIProcessGroup *entries = NULL;
     WSGIProcessGroup *entry = NULL;
 
     int i;
-
-    error = ap_check_cmd_context(cmd, GLOBAL_ONLY);
-    if (error != NULL)
-        return error;
 
     name = ap_getword_conf(cmd->temp_pool, &args);
 
@@ -4641,22 +4634,19 @@ static const char *wsgi_add_daemon_process(cmd_parms *cmd, void *mconfig,
             return "Invalid option to WSGI daemon process definition.";
     }
 
-    config = ap_get_module_config(cmd->server->module_config, &wsgi_module);
-
-    if (!config->daemon_list) {
-        config->daemon_list = apr_array_make(config->pool, 20,
-                                             sizeof(WSGIProcessGroup));
-    }
-
     /* XXX Multithreading not currently implemented. */
 
     if (threads != 1)
         return "Multithreading not currently supported, use threads=1.";
 
-    daemons = config->daemon_list;
-    entries = (WSGIProcessGroup *)daemons->elts;
+    if (!wsgi_daemon_list) {
+        wsgi_daemon_list = apr_array_make(cmd->pool, 20,
+                                          sizeof(WSGIProcessGroup));
+    }
 
-    for (i = 0; i < daemons->nelts; ++i) {
+    entries = (WSGIProcessGroup *)wsgi_daemon_list->elts;
+
+    for (i = 0; i < wsgi_daemon_list->nelts; ++i) {
         entry = &entries[i];
 
         if (!strcmp(entry->name, name))
@@ -4665,15 +4655,15 @@ static const char *wsgi_add_daemon_process(cmd_parms *cmd, void *mconfig,
 
     wsgi_daemon_count++;
 
-    entry = (WSGIProcessGroup *)apr_array_push(config->daemon_list);
+    entry = (WSGIProcessGroup *)apr_array_push(wsgi_daemon_list);
 
     entry->server = cmd->server;
 
     entry->id = wsgi_daemon_count;
 
-    entry->name = apr_pstrdup(config->pool, name);
-    entry->user = apr_pstrdup(config->pool, user);
-    entry->group = apr_pstrdup(config->pool, group);
+    entry->name = apr_pstrdup(cmd->pool, name);
+    entry->user = apr_pstrdup(cmd->pool, user);
+    entry->group = apr_pstrdup(cmd->pool, group);
 
     entry->uid = uid;
     entry->gid = gid;
@@ -4750,7 +4740,7 @@ static void wsgi_manage_process(int reason, void *data, apr_wait_t status)
 
             if (!stopping) {
                 ap_log_error(APLOG_MARK, WSGI_LOG_INFO(0),
-                             daemon->group->server, "mod_wsgi (pid=%d): "
+                             wsgi_server, "mod_wsgi (pid=%d): "
                              "Process '%s' has died, restarting.",
                              daemon->process.pid, daemon->group->name);
 
@@ -4777,14 +4767,14 @@ static void wsgi_manage_process(int reason, void *data, apr_wait_t status)
             if (daemon->instance == 1) {
                 if (close(daemon->group->listener_fd) < 0) {
                     ap_log_error(APLOG_MARK, WSGI_LOG_ERR(errno),
-                                 daemon->group->server, "mod_wsgi (pid=%d): "
+                                 wsgi_server, "mod_wsgi (pid=%d): "
                                  "Couldn't close unix domain socket '%s'.",
                                  getpid(), daemon->group->socket);
                 }
 
                 if (unlink(daemon->group->socket) < 0 && errno != ENOENT) {
                     ap_log_error(APLOG_MARK, WSGI_LOG_ERR(errno),
-                                 daemon->group->server, "mod_wsgi (pid=%d): "
+                                 wsgi_server, "mod_wsgi (pid=%d): "
                                  "Couldn't unlink unix domain socket '%s'.",
                                  getpid(), daemon->group->socket);
                 }
@@ -4804,7 +4794,7 @@ static void wsgi_manage_process(int reason, void *data, apr_wait_t status)
             /* Restart the child daemon process that has died. */
 
             ap_log_error(APLOG_MARK, WSGI_LOG_INFO(0),
-                         daemon->group->server, "mod_wsgi (pid=%d): "
+                         wsgi_server, "mod_wsgi (pid=%d): "
                          "Process '%s' has died, restarting.",
                          daemon->process.pid, daemon->group->name);
 
@@ -4834,14 +4824,14 @@ static void wsgi_setup_access(WSGIDaemonProcess *daemon)
     /* Setup the daemon process real and effective group. */
 
     if (setgid(daemon->group->gid) == -1) {
-        ap_log_error(APLOG_MARK, WSGI_LOG_ALERT(errno), daemon->group->server,
+        ap_log_error(APLOG_MARK, WSGI_LOG_ALERT(errno), wsgi_server,
                      "mod_wsgi (pid=%d): Unable to set group id to gid=%d.",
                      getpid(), daemon->group->gid);
     }
     else {
         if (initgroups(daemon->group->user, daemon->group->gid) == -1) {
             ap_log_error(APLOG_MARK, WSGI_LOG_ALERT(errno),
-                         daemon->group->server, "mod_wsgi (pid=%d): Unable "
+                         wsgi_server, "mod_wsgi (pid=%d): Unable "
                          "to set groups for uname=%s and gid=%u.", getpid(),
                          daemon->group->user, (unsigned)daemon->group->gid);
         }
@@ -4850,7 +4840,7 @@ static void wsgi_setup_access(WSGIDaemonProcess *daemon)
     /* Setup the daemon process real and effective user. */
 
     if (setuid(daemon->group->uid) == -1) {
-        ap_log_error(APLOG_MARK, WSGI_LOG_ALERT(errno), daemon->group->server,
+        ap_log_error(APLOG_MARK, WSGI_LOG_ALERT(errno), wsgi_server,
                      "mod_wsgi (pid=%d): Unable to change to uid=%ld.",
                      getpid(), (long)daemon->group->uid);
     }
@@ -4864,12 +4854,12 @@ static int wsgi_setup_socket(WSGIProcessGroup *process)
     mode_t omask;
     int rc;
 
-    ap_log_error(APLOG_MARK, WSGI_LOG_DEBUG(0), process->server,
+    ap_log_error(APLOG_MARK, WSGI_LOG_DEBUG(0), wsgi_server,
                  "mod_wsgi (pid=%d): Socket for '%s' is '%s'.",
                  getpid(), process->name, process->socket);
 
     if ((sockfd = socket(AF_UNIX, SOCK_STREAM, 0)) < 0) {
-        ap_log_error(APLOG_MARK, WSGI_LOG_ALERT(errno), process->server,
+        ap_log_error(APLOG_MARK, WSGI_LOG_ALERT(errno), wsgi_server,
                      "mod_wsgi (pid=%d): Couldn't create unix domain "
                      "socket.", getpid());
         return -1;
@@ -4883,14 +4873,14 @@ static int wsgi_setup_socket(WSGIProcessGroup *process)
     rc = bind(sockfd, (struct sockaddr *)&addr, sizeof(addr));
     umask(omask);
     if (rc < 0) {
-        ap_log_error(APLOG_MARK, WSGI_LOG_ALERT(errno), process->server,
+        ap_log_error(APLOG_MARK, WSGI_LOG_ALERT(errno), wsgi_server,
                      "mod_wsgi (pid=%d): Couldn't bind unix domain "
                      "socket '%s'.", getpid(), process->socket);
         return -1;
     }
 
     if (listen(sockfd, WSGI_LISTEN_BACKLOG) < 0) {
-        ap_log_error(APLOG_MARK, WSGI_LOG_ALERT(errno), process->server,
+        ap_log_error(APLOG_MARK, WSGI_LOG_ALERT(errno), wsgi_server,
                      "mod_wsgi (pid=%d): Couldn't listen on unix domain "
                      "socket.", getpid());
         return -1;
@@ -4898,7 +4888,7 @@ static int wsgi_setup_socket(WSGIProcessGroup *process)
 
     if (!geteuid()) {
         if (chown(process->socket, unixd_config.user_id, -1) < 0) {
-            ap_log_error(APLOG_MARK, WSGI_LOG_ALERT(errno), process->server,
+            ap_log_error(APLOG_MARK, WSGI_LOG_ALERT(errno), wsgi_server,
                          "mod_wsgi (pid=%d): Couldn't change owner of unix "
                          "domain socket '%s'.", getpid(),
                          process->socket);
@@ -4934,6 +4924,14 @@ static void wsgi_daemon_main(apr_pool_t *p, WSGIDaemonProcess *daemon)
     apr_pool_t *ptrans;
     apr_bucket_alloc_t *bucket_alloc;
 
+    /*
+     * Update reference to server object in case daemon process
+     * is actually associated with a virtual host. This way all
+     * logging actually goes into the virtual hosts log file.
+     */
+
+    wsgi_server = daemon->group->server;
+
     /* Create socket wrapper for listener file descriptor. */
 
     apr_os_sock_put(&daemon->listener, &daemon->group->listener_fd, p);
@@ -4947,7 +4945,7 @@ static void wsgi_daemon_main(apr_pool_t *p, WSGIDaemonProcess *daemon)
             if (rv != APR_SUCCESS) {
                 if (!wsgi_daemon_shutdown) {
                     ap_log_error(APLOG_MARK, WSGI_LOG_CRIT(rv),
-                                 daemon->group->server, "mod_wsgi (pid=%d): "
+                                 wsgi_server, "mod_wsgi (pid=%d): "
                                  "Couldn't acquire accept mutex '%s'.",
                                  getpid(), daemon->group->socket);
                 }
@@ -4966,7 +4964,7 @@ static void wsgi_daemon_main(apr_pool_t *p, WSGIDaemonProcess *daemon)
             if (rv != APR_SUCCESS) {
                 if (!wsgi_daemon_shutdown) {
                     ap_log_error(APLOG_MARK, WSGI_LOG_CRIT(rv),
-                                 daemon->group->server, "mod_wsgi (pid=%d): "
+                                 wsgi_server, "mod_wsgi (pid=%d): "
                                  "Couldn't release accept mutex '%s'.",
                                  getpid(), daemon->group->socket);
 
@@ -4995,17 +4993,16 @@ static int wsgi_start_process(apr_pool_t *p, WSGIDaemonProcess *daemon)
     ap_listen_rec *lr;
 
     if ((status = apr_proc_fork(&daemon->process, p)) < 0) {
-        ap_log_error(APLOG_MARK, WSGI_LOG_ALERT(errno), daemon->group->server,
+        ap_log_error(APLOG_MARK, WSGI_LOG_ALERT(errno), wsgi_server,
                      "mod_wsgi: Couldn't spawn process '%s'.",
                      daemon->group->name);
         return DECLINED;
     }
     else if (status == APR_INCHILD) {
-        ap_log_error(APLOG_MARK, WSGI_LOG_INFO(0),
-                     daemon->group->server, "mod_wsgi (pid=%d): "
-                     "Starting process '%s' with uid=%ld and gid=%u.",
-                     getpid(), daemon->group->name, (long)daemon->group->uid,
-                     (unsigned)daemon->group->gid);
+        ap_log_error(APLOG_MARK, WSGI_LOG_INFO(0), wsgi_server,
+                     "mod_wsgi (pid=%d): Starting process '%s' with "
+                     "uid=%ld and gid=%u.", getpid(), daemon->group->name,
+                     (long)daemon->group->uid, (unsigned)daemon->group->gid);
 
 #ifdef HAVE_BINDPROCESSOR
         /*
@@ -5017,9 +5014,9 @@ static int wsgi_start_process(apr_pool_t *p, WSGIDaemonProcess *daemon)
         status = bindprocessor(BINDPROCESS, (int)getpid(),
                                PROCESSOR_CLASS_ANY);
         if (status != OK) {
-            ap_log_error(APLOG_MARK, WSGI_LOG_ERR(errno),
-                         daemon->group->server, "mod_wsgi (pid=%d): "
-                         "Failed to unbind processor.", getpid());
+            ap_log_error(APLOG_MARK, WSGI_LOG_ERR(errno), wsgi_server,
+                         "mod_wsgi (pid=%d): Failed to unbind processor.",
+                         getpid());
         }
 #endif
 
@@ -5034,8 +5031,7 @@ static int wsgi_start_process(apr_pool_t *p, WSGIDaemonProcess *daemon)
                                                daemon->group->mutex_path, p);
 
             if (status != APR_SUCCESS) {
-                ap_log_error(APLOG_MARK, WSGI_LOG_CRIT(0),
-                             daemon->group->server,
+                ap_log_error(APLOG_MARK, WSGI_LOG_CRIT(0), wsgi_server,
                              "mod_wsgi (pid=%d): Couldn't intialise accept "
                              "mutex in daemon process '%s'.",
                              getpid(), daemon->group->mutex_path);
@@ -5155,9 +5151,8 @@ static int wsgi_start_process(apr_pool_t *p, WSGIDaemonProcess *daemon)
          * have the side affect of also destroying Python.
          */
 
-        ap_log_error(APLOG_MARK, WSGI_LOG_INFO(0),
-                     daemon->group->server, "mod_wsgi (pid=%d): "
-                     "Stopping process '%s'.", getpid(),
+        ap_log_error(APLOG_MARK, WSGI_LOG_INFO(0), wsgi_server,
+                     "mod_wsgi (pid=%d): Stopping process '%s'.", getpid(),
                      daemon->group->name);
 
         apr_pool_destroy(wsgi_daemon_pool);
@@ -5176,8 +5171,6 @@ static int wsgi_start_process(apr_pool_t *p, WSGIDaemonProcess *daemon)
 
 static int wsgi_start_daemons(apr_pool_t *p)
 {
-    apr_array_header_t *daemons = NULL;
-
     WSGIProcessGroup *entries = NULL;
     WSGIProcessGroup *entry = NULL;
     WSGIDaemonProcess *process = NULL;
@@ -5186,9 +5179,7 @@ static int wsgi_start_daemons(apr_pool_t *p)
 
     /* Do we need to create any daemon processes. */
 
-    daemons = wsgi_server_config->daemon_list;
-
-    if (!daemons)
+    if (!wsgi_daemon_list)
         return OK;
 
     /*
@@ -5206,9 +5197,9 @@ static int wsgi_start_daemons(apr_pool_t *p)
 
     wsgi_daemon_sockets = apr_table_make(p, wsgi_daemon_count);
 
-    entries = (WSGIProcessGroup *)daemons->elts;
+    entries = (WSGIProcessGroup *)wsgi_daemon_list->elts;
 
-    for (i = 0; i < daemons->nelts; ++i) {
+    for (i = 0; i < wsgi_daemon_list->nelts; ++i) {
         int status;
 
         entry = &entries[i];
@@ -5245,10 +5236,10 @@ static int wsgi_start_daemons(apr_pool_t *p)
                                            ap_accept_lock_mech, p);
 
             if (status != APR_SUCCESS) {
-                ap_log_error(APLOG_MARK, WSGI_LOG_CRIT(errno),
-                             entry->server, "mod_wsgi (pid=%d): "
-                             "Couldn't create accept lock '%s' (%d).",
-                             getpid(), entry->mutex_path, ap_accept_lock_mech);
+                ap_log_error(APLOG_MARK, WSGI_LOG_CRIT(errno), wsgi_server,
+                             "mod_wsgi (pid=%d): Couldn't create accept "
+                             "lock '%s' (%d).", getpid(), entry->mutex_path,
+                             ap_accept_lock_mech);
                 return DECLINED;
             }
 
@@ -5279,10 +5270,9 @@ static int wsgi_start_daemons(apr_pool_t *p)
                 buf.sem_perm.mode = 0600;
                 ick.buf = &buf;
                 if (semctl(ospmutex.crossproc, 0, IPC_SET, ick) < 0) {
-                    ap_log_error(APLOG_MARK, WSGI_LOG_CRIT(errno),
-                                 entry->server, "mod_wsgi (pid=%d): "
-                                 "Couldn't set permissions on accept mutex "
-                                 "'%s' (sysvsem).", getpid(),
+                    ap_log_error(APLOG_MARK, WSGI_LOG_CRIT(errno), wsgi_server,
+                                 "mod_wsgi (pid=%d): Couldn't set permissions "
+                                 "on accept mutex '%s' (sysvsem).", getpid(),
                                  entry->mutex_path);
                     return DECLINED;
                 }
@@ -5291,10 +5281,9 @@ static int wsgi_start_daemons(apr_pool_t *p)
 #if APR_HAS_FLOCK_SERIALIZE
             if (!strcmp(apr_proc_mutex_name(entry->mutex), "flock")) {
                 if (chown(entry->mutex_path, entry->uid, -1) < 0) {
-                    ap_log_error(APLOG_MARK, WSGI_LOG_CRIT(errno),
-                                 entry->server, "mod_wsgi (pid=%d): "
-                                 "Couldn't set permissions on accept mutex "
-                                 "'%s' (flock).", getpid(),
+                    ap_log_error(APLOG_MARK, WSGI_LOG_CRIT(errno), wsgi_server,
+                                 "mod_wsgi (pid=%d): Couldn't set permissions "
+                                 "on accept mutex '%s' (flock).", getpid(),
                                  entry->mutex_path);
                     return DECLINED;
                 }
