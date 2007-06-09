@@ -4916,25 +4916,13 @@ static void wsgi_process_socket(apr_pool_t *p, apr_socket_t *sock,
     }
 }
 
-static void wsgi_daemon_main(apr_pool_t *p, WSGIDaemonProcess *daemon)
+static void wsgi_daemon_worker(apr_pool_t *p, WSGIDaemonProcess *daemon)
 {
     apr_status_t status;
     apr_socket_t *socket;
 
     apr_pool_t *ptrans;
     apr_bucket_alloc_t *bucket_alloc;
-
-    /*
-     * Update reference to server object in case daemon process
-     * is actually associated with a virtual host. This way all
-     * logging actually goes into the virtual hosts log file.
-     */
-
-    wsgi_server = daemon->group->server;
-
-    /* Create socket wrapper for listener file descriptor. */
-
-    apr_os_sock_put(&daemon->listener, &daemon->group->listener_fd, p);
 
     /* Loop until signal received to shutdown daemon process. */
 
@@ -4949,6 +4937,12 @@ static void wsgi_daemon_main(apr_pool_t *p, WSGIDaemonProcess *daemon)
                                  "Couldn't acquire accept mutex '%s'.",
                                  getpid(), daemon->group->socket);
                 }
+
+                return;
+            }
+
+            if (wsgi_daemon_shutdown) {
+                apr_proc_mutex_unlock(daemon->group->mutex);
 
                 return;
             }
@@ -4967,6 +4961,7 @@ static void wsgi_daemon_main(apr_pool_t *p, WSGIDaemonProcess *daemon)
                                  wsgi_server, "mod_wsgi (pid=%d): "
                                  "Couldn't release accept mutex '%s'.",
                                  getpid(), daemon->group->socket);
+                    apr_pool_destroy(ptrans);
 
                     return;
                 }
@@ -4983,6 +4978,25 @@ static void wsgi_daemon_main(apr_pool_t *p, WSGIDaemonProcess *daemon)
         wsgi_process_socket(ptrans, socket, bucket_alloc, daemon);
 
         apr_pool_destroy(ptrans);
+    }
+}
+
+static void wsgi_daemon_main(apr_pool_t *p, WSGIDaemonProcess *daemon)
+{
+    /*
+     * If process running in single threaded mode only need run
+     * the main worker function. If multiple threads required
+     * then startup all the threads and wait for them to exit
+     * when shutdown is signaled.
+     */
+
+    if (daemon->group->threads == 1)
+        wsgi_daemon_worker(p, daemon);
+
+    else {
+        /* Multithread support not yet implemented. */
+
+        sleep(20);
     }
 }
 
@@ -5141,6 +5155,19 @@ static int wsgi_start_process(apr_pool_t *p, WSGIDaemonProcess *daemon)
 
         wsgi_python_initialized = 1;
         wsgi_python_child_init(wsgi_daemon_pool);
+
+        /*
+	 * Update reference to server object in case daemon
+	 * process is actually associated with a virtual host.
+	 * This way all logging actually goes into the virtual
+	 * hosts log file.
+         */
+
+        wsgi_server = daemon->group->server;
+
+        /* Create socket wrapper for listener file descriptor. */
+
+        apr_os_sock_put(&daemon->listener, &daemon->group->listener_fd, p);
 
         /* Run the main routine for the daemon process. */
 
