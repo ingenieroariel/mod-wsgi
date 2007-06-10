@@ -4944,19 +4944,20 @@ static void wsgi_daemon_worker(apr_pool_t *p, WSGIDaemonThread *thread)
     apr_bucket_alloc_t *bucket_alloc;
 
     WSGIDaemonProcess *daemon = thread->process;
+    WSGIProcessGroup *group = daemon->group;
 
     /* Loop until signal received to shutdown daemon process. */
 
     while (!wsgi_daemon_shutdown) {
         apr_status_t rv;
 
-        if (daemon->group->mutex) {
+        if (group->mutex) {
             /*
              * Grab the accept mutex across all daemon processes
              * in this process group.
              */
 
-            rv = apr_proc_mutex_lock(daemon->group->mutex);
+            rv = apr_proc_mutex_lock(group->mutex);
 
             if (rv != APR_SUCCESS) {
 #if defined(EIDRM)
@@ -4977,8 +4978,10 @@ static void wsgi_daemon_worker(apr_pool_t *p, WSGIDaemonThread *thread)
                  * therefore also be in process of being
                  * shutdown or killed.
                  */
-                if (daemon->group->threads > 1 && errno == EIDRM)
-                    wsgi_daemon_shutdown = 1;
+                if (!strcmp(apr_proc_mutex_name(group->mutex), "sysvsem")) {
+                    if (errno == EIDRM && group->threads > 1)
+                        wsgi_daemon_shutdown = 1;
+                }
 #endif
 
                 if (!wsgi_daemon_shutdown) {
@@ -4986,7 +4989,7 @@ static void wsgi_daemon_worker(apr_pool_t *p, WSGIDaemonThread *thread)
                                  wsgi_server, "mod_wsgi (pid=%d): "
                                  "Couldn't acquire accept mutex '%s'. "
                                  "Shutting down daemon process.",
-                                 getpid(), daemon->group->socket);
+                                 getpid(), group->socket);
 
                     kill(getpid(), SIGTERM);
                     sleep(5);
@@ -5001,7 +5004,7 @@ static void wsgi_daemon_worker(apr_pool_t *p, WSGIDaemonThread *thread)
              */
 
             if (wsgi_daemon_shutdown) {
-                apr_proc_mutex_unlock(daemon->group->mutex);
+                apr_proc_mutex_unlock(group->mutex);
 
                 break;
             }
@@ -5042,7 +5045,7 @@ static void wsgi_daemon_worker(apr_pool_t *p, WSGIDaemonThread *thread)
                              wsgi_server, "mod_wsgi (pid=%d): "
                              "Unable to poll daemon socket for '%s'. "
                              "Shutting down daemon process.",
-                             getpid(), daemon->group->socket);
+                             getpid(), group->socket);
 
                 kill(getpid(), SIGTERM);
                 sleep(5);
@@ -5050,8 +5053,8 @@ static void wsgi_daemon_worker(apr_pool_t *p, WSGIDaemonThread *thread)
         }
 
         if (wsgi_daemon_shutdown) {
-            if (daemon->group->mutex)
-                apr_proc_mutex_unlock(daemon->group->mutex);
+            if (group->mutex)
+                apr_proc_mutex_unlock(group->mutex);
 
             apr_pool_destroy(ptrans);
 
@@ -5059,8 +5062,8 @@ static void wsgi_daemon_worker(apr_pool_t *p, WSGIDaemonThread *thread)
         }
 
         if (rv != APR_SUCCESS && APR_STATUS_IS_EINTR(rv)) {
-            if (daemon->group->mutex)
-                apr_proc_mutex_unlock(daemon->group->mutex);
+            if (group->mutex)
+                apr_proc_mutex_unlock(group->mutex);
 
             apr_pool_destroy(ptrans);
 
@@ -5071,15 +5074,15 @@ static void wsgi_daemon_worker(apr_pool_t *p, WSGIDaemonThread *thread)
 
         status = apr_socket_accept(&socket, daemon->listener, ptrans);
 
-        if (daemon->group->mutex) {
+        if (group->mutex) {
             apr_status_t rv;
-            rv = apr_proc_mutex_unlock(daemon->group->mutex);
+            rv = apr_proc_mutex_unlock(group->mutex);
             if (rv != APR_SUCCESS) {
                 if (!wsgi_daemon_shutdown) {
                     ap_log_error(APLOG_MARK, WSGI_LOG_CRIT(rv),
                                  wsgi_server, "mod_wsgi (pid=%d): "
                                  "Couldn't release accept mutex '%s'.",
-                                 getpid(), daemon->group->socket);
+                                 getpid(), group->socket);
                     apr_pool_destroy(ptrans);
                     thread->running = 0;
 
@@ -5187,9 +5190,9 @@ static void wsgi_daemon_main(apr_pool_t *p, WSGIDaemonProcess *daemon)
 
             if (rv != APR_SUCCESS) {
                 ap_log_error(APLOG_MARK, WSGI_LOG_ALERT(rv), wsgi_server,
-                             "mod_wsgi (pid=%d): Couldn't create worker thread "
-                             "%d in daemon process '%s'.", getpid(), i,
-                             daemon->group->name);
+                             "mod_wsgi (pid=%d): Couldn't create worker "
+                             "thread %d in daemon process '%s'.", getpid(),
+                             i, daemon->group->name);
 
                 /*
                  * Try to force an exit of the process if fail
