@@ -4959,12 +4959,37 @@ static void wsgi_daemon_worker(apr_pool_t *p, WSGIDaemonThread *thread)
             rv = apr_proc_mutex_lock(daemon->group->mutex);
 
             if (rv != APR_SUCCESS) {
+#if defined(EIDRM)
+                /*
+                 * When using multiple threads locking the
+                 * process accept mutex fails with an EIDRM when
+                 * process being shutdown but signal check
+                 * hasn't triggered quick enough to set shutdown
+                 * flag. This causes lots of error messages to
+                 * be logged which make it look like something
+                 * nasty has happened even when it hasn't. For
+                 * now assume that if multiple threads and EIDRM
+                 * occurs that it is okay and the process is
+                 * being shutdown. The condition should by
+                 * rights only occur when the Apache parent
+                 * process is being shutdown or has died for
+                 * some reason so daemon process would logically
+                 * therefore also be in process of being
+                 * shutdown or killed.
+                 */
+                if (daemon->group->threads > 1 && errno == EIDRM)
+                    wsgi_daemon_shutdown = 1;
+#endif
+
                 if (!wsgi_daemon_shutdown) {
                     ap_log_error(APLOG_MARK, WSGI_LOG_CRIT(rv),
                                  wsgi_server, "mod_wsgi (pid=%d): "
                                  "Couldn't acquire accept mutex '%s'. "
                                  "Shutting down daemon process.",
                                  getpid(), daemon->group->socket);
+
+                    kill(getpid(), SIGTERM);
+                    sleep(5);
                 }
 
                 break;
@@ -5167,8 +5192,8 @@ static void wsgi_daemon_main(apr_pool_t *p, WSGIDaemonProcess *daemon)
                              daemon->group->name);
 
                 /*
-		 * Try to force an exit of the process if fail
-		 * to create the worker threads.
+                 * Try to force an exit of the process if fail
+                 * to create the worker threads.
                  */
 
                 kill(getpid(), SIGTERM);
@@ -5185,9 +5210,9 @@ static void wsgi_daemon_main(apr_pool_t *p, WSGIDaemonProcess *daemon)
                      getpid(), daemon->group->name);
 
         /*
-	 * Attempt a graceful shutdown by waiting for any
-	 * threads which were processing a request at the time
-	 * of shutdown. In some respects this is a bit pointless
+         * Attempt a graceful shutdown by waiting for any
+         * threads which were processing a request at the time
+         * of shutdown. In some respects this is a bit pointless
          * as even though we allow the requests to be completed,
          * the Apache child process which proxied the request
          * through to this daemon process could get killed off
