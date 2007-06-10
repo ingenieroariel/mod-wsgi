@@ -4487,6 +4487,7 @@ module MODULE_VAR_EXPORT wsgi_module = {
 #include "apr_proc_mutex.h"
 #include "http_connection.h"
 #include "apr_buckets.h"
+#include "apr_poll.h"
 
 #if APR_HAVE_SYS_SOCKET_H
 #include <sys/socket.h>
@@ -4534,6 +4535,12 @@ typedef struct {
     apr_proc_t process;
     apr_socket_t *listener;
 } WSGIDaemonProcess;
+
+typedef struct {
+    WSGIDaemonProcess *process;
+    apr_thread_t *thread;
+    int running;
+} WSGIDaemonThread;
 
 typedef struct {
     const char *name;
@@ -4694,9 +4701,20 @@ static const char *wsgi_set_socket_prefix(cmd_parms *cmd, void *mconfig,
     return NULL;
 }
 
-static void wsgi_signal_handler(int sig)
+static void wsgi_signal_handler(int signum)
 {
     wsgi_daemon_shutdown++;
+}
+
+static int wsgi_check_signal(int signum)
+{
+    if (signum == SIGINT || signum == SIGTERM) {
+        wsgi_daemon_shutdown++;
+
+        return 1;
+    }
+
+    return 0;
 }
 
 static int wsgi_start_process(apr_pool_t *p, WSGIDaemonProcess *daemon);
@@ -4911,20 +4929,28 @@ static void wsgi_process_socket(apr_pool_t *p, apr_socket_t *sock,
     }
 }
 
-static void wsgi_daemon_worker(apr_pool_t *p, WSGIDaemonProcess *daemon)
+static void wsgi_daemon_worker(apr_pool_t *p, WSGIDaemonThread *thread)
 {
     apr_status_t status;
     apr_socket_t *socket;
 
     apr_pool_t *ptrans;
+
+    apr_pollset_t *pollset;
+    apr_pollfd_t pfd = { 0 };
+    apr_int32_t numdesc;
+    const apr_pollfd_t *pdesc;
+
     apr_bucket_alloc_t *bucket_alloc;
+
+    WSGIDaemonProcess *daemon = thread->process;
 
     /* Loop until signal received to shutdown daemon process. */
 
     while (!wsgi_daemon_shutdown) {
-        if (daemon->group->mutex) {
-            apr_status_t rv;
+        apr_status_t rv;
 
+        if (daemon->group->mutex) {
             /*
              * Grab the accept mutex across all daemon processes
              * in this process group.
@@ -4933,29 +4959,6 @@ static void wsgi_daemon_worker(apr_pool_t *p, WSGIDaemonProcess *daemon)
             rv = apr_proc_mutex_lock(daemon->group->mutex);
 
             if (rv != APR_SUCCESS) {
-#if defined(EIDRM)
-                /*
-                 * When using multiple threads locking the process
-                 * accept mutex fails with an EIDRM when process
-                 * being shutdown but signal handler hasn't triggered
-                 * quick enough to set shutdown flag. This causes
-                 * lots of error messages to be logged which make
-                 * it look like something nasty has happened even
-                 * when it hasn't. Even adding a subsecond delay to
-                 * allow signal handler to execute isn't helping.
-                 * A full one second sleep does, but that slows down
-                 * process shutdown. For now assume that if multiple
-                 * threads and EIDRM occurs that it is okay and the
-                 * process is being shutdown. The condition should
-                 * by rights only occur when the Apache parent process
-                 * is being shutdown or has died for some reason so
-                 * daemon process would logically therefore also be
-                 * in process of being shutdown or killed.
-                 */
-                if (daemon->group->threads > 1 && errno == EIDRM)
-                    wsgi_daemon_shutdown = 1;
-#endif
-
                 if (!wsgi_daemon_shutdown) {
                     ap_log_error(APLOG_MARK, WSGI_LOG_CRIT(rv),
                                  wsgi_server, "mod_wsgi (pid=%d): "
@@ -4981,7 +4984,65 @@ static void wsgi_daemon_worker(apr_pool_t *p, WSGIDaemonProcess *daemon)
 
         apr_pool_create(&ptrans, p);
 
-        /* Accept socket connection from the child process. */
+        /*
+         * Accept socket connection from the child process. We
+         * test the socket for whether it is ready before actually
+         * performing the accept() so that can know for sure that
+         * we will be processing a request and flag thread as
+         * running. Only bother to do join with thread which is
+         * actually running when process is being shutdown.
+         */
+
+        apr_pollset_create(&pollset, 1, ptrans, 0);
+
+        memset(&pfd, '\0', sizeof(pfd));
+        pfd.desc_type = APR_POLL_SOCKET;
+        pfd.desc.s = daemon->listener;
+        pfd.reqevents = APR_POLLIN;
+        pfd.client_data = daemon;
+
+        apr_pollset_add(pollset, &pfd);
+
+        while (!wsgi_daemon_shutdown) {
+            rv = apr_pollset_poll(pollset, -1, &numdesc, &pdesc);
+
+            if (rv == APR_SUCCESS)
+                break;
+
+            if (APR_STATUS_IS_EINTR(rv))
+                break;
+
+            if (rv != APR_SUCCESS && !APR_STATUS_IS_EINTR(rv)) {
+                ap_log_error(APLOG_MARK, WSGI_LOG_CRIT(rv),
+                             wsgi_server, "mod_wsgi (pid=%d): "
+                             "Unable to poll daemon socket for '%s'. "
+                             "Shutting down daemon process.",
+                             getpid(), daemon->group->socket);
+
+                kill(getpid(), SIGTERM);
+                sleep(5);
+            }
+        }
+
+        if (wsgi_daemon_shutdown) {
+            if (daemon->group->mutex)
+                apr_proc_mutex_unlock(daemon->group->mutex);
+
+            apr_pool_destroy(ptrans);
+
+            break;
+        }
+
+        if (rv != APR_SUCCESS && APR_STATUS_IS_EINTR(rv)) {
+            if (daemon->group->mutex)
+                apr_proc_mutex_unlock(daemon->group->mutex);
+
+            apr_pool_destroy(ptrans);
+
+            continue;
+        }
+
+        thread->running = 1;
 
         status = apr_socket_accept(&socket, daemon->listener, ptrans);
 
@@ -4995,15 +5056,18 @@ static void wsgi_daemon_worker(apr_pool_t *p, WSGIDaemonProcess *daemon)
                                  "Couldn't release accept mutex '%s'.",
                                  getpid(), daemon->group->socket);
                     apr_pool_destroy(ptrans);
+                    thread->running = 0;
 
                     break;
                 }
             }
         }
 
-        if (status != APR_SUCCESS) {
-            if (APR_STATUS_IS_EINTR(status))
-                continue;
+        if (status != APR_SUCCESS && APR_STATUS_IS_EINTR(status)) {
+            apr_pool_destroy(ptrans);
+            thread->running = 0;
+
+            continue;
         }
 
         /* Process the request proxied from the child process. */
@@ -5014,15 +5078,19 @@ static void wsgi_daemon_worker(apr_pool_t *p, WSGIDaemonProcess *daemon)
         /* Cleanup ready for next request. */
 
         apr_pool_destroy(ptrans);
+
+        thread->running = 0;
     }
 }
 
 static void *wsgi_daemon_thread(apr_thread_t *thd, void *data)
 {
-    WSGIDaemonProcess *daemon = data;
+    WSGIDaemonThread *thread = data;
     apr_pool_t *p = apr_thread_pool_get(thd);
 
-    wsgi_daemon_worker(p, daemon);
+    wsgi_daemon_worker(p, thread);
+
+    apr_thread_exit(thd, APR_SUCCESS);
 
     return NULL;
 }
@@ -5036,19 +5104,35 @@ static void wsgi_daemon_main(apr_pool_t *p, WSGIDaemonProcess *daemon)
      * when shutdown is signaled.
      */
 
-    if (daemon->group->threads == 1)
-        wsgi_daemon_worker(p, daemon);
+    if (daemon->group->threads == 1) {
+        WSGIDaemonThread thread;
 
+        thread.process = daemon;
+        thread.thread = NULL;
+        thread.running = 0;
+
+        wsgi_daemon_worker(p, &thread);
+    }
     else {
-        apr_thread_t **threads;
+        WSGIDaemonThread *threads;
         apr_threadattr_t *thread_attr;
 
         int i;
         apr_status_t rv;
         apr_status_t thread_rv;
 
-        threads = (apr_thread_t **)apr_pcalloc(p, daemon->group->threads
-                                               * sizeof(apr_thread_t *));
+        /* Block all signals from being received. */
+
+        rv = apr_setup_signal_thread();
+        if (rv != APR_SUCCESS) {
+            ap_log_error(APLOG_MARK, WSGI_LOG_EMERG(rv), wsgi_server,
+                         "mod_wsgi (pid=%d): Couldn't initialise signal "
+                         "thread in daemon process '%s'.", getpid(),
+                         daemon->group->name);
+            sleep(20);
+
+            return;
+        }
 
         /* Ensure that threads are joinable. */
 
@@ -5056,6 +5140,9 @@ static void wsgi_daemon_main(apr_pool_t *p, WSGIDaemonProcess *daemon)
         apr_threadattr_detach_set(thread_attr, 0);
 
         /* Start the required number of threads. */
+
+        threads = (WSGIDaemonThread *)apr_pcalloc(p, daemon->group->threads
+                                                  * sizeof(WSGIDaemonThread));
 
         ap_log_error(APLOG_MARK, WSGI_LOG_DEBUG(0), wsgi_server,
                      "mod_wsgi (pid=%d): Starting %d threads in daemon "
@@ -5067,40 +5154,55 @@ static void wsgi_daemon_main(apr_pool_t *p, WSGIDaemonProcess *daemon)
                          "mod_wsgi (pid=%d): Starting thread %d in daemon "
                          "process '%s'.", getpid(), i+1, daemon->group->name);
 
-            rv = apr_thread_create(&threads[i], thread_attr,
-                                   wsgi_daemon_thread, daemon, p);
+            threads[i].process = daemon;
+            threads[i].running = 0;
+
+            rv = apr_thread_create(&threads[i].thread, thread_attr,
+                                   wsgi_daemon_thread, &threads[i], p);
 
             if (rv != APR_SUCCESS) {
                 ap_log_error(APLOG_MARK, WSGI_LOG_ALERT(rv), wsgi_server,
-                             "mod_wsgi: Couldn't create worker thread "
-                             "%d in daemon process '%s'.", i,
+                             "mod_wsgi (pid=%d): Couldn't create worker thread "
+                             "%d in daemon process '%s'.", getpid(), i,
                              daemon->group->name);
 
                 /*
 		 * Try to force an exit of the process if fail
-		 * to create the worker threads. This would only
-		 * really occur if system resources are
-		 * exhausted so unlikely, thus don't worry that
-		 * way of killing of the process is a bit dodgy.
+		 * to create the worker threads.
                  */
 
-                kill(getpid(), SIGTERM);
-                sleep(1);
                 kill(getpid(), SIGTERM);
                 sleep(5);
             }
         }
 
-        /* Now wait for all the threads to exit. */
+        /* Block until we get a process shutdown signal. */
+
+        apr_signal_thread(wsgi_check_signal);
+
+        ap_log_error(APLOG_MARK, WSGI_LOG_INFO(0), wsgi_server,
+                     "mod_wsgi (pid=%d): Shutdown requested '%s'.",
+                     getpid(), daemon->group->name);
+
+        /*
+	 * Attempt a graceful shutdown by waiting for any
+	 * threads which were processing a request at the time
+	 * of shutdown. In some respects this is a bit pointless
+         * as even though we allow the requests to be completed,
+         * the Apache child process which proxied the request
+         * through to this daemon process could get killed off
+         * before the daemon process and so the response gets
+         * cut off or lost.
+         */
 
         for (i=0; i<daemon->group->threads; i++) {
-            if (threads[i]) {
-                rv = apr_thread_join(&thread_rv, threads[i]);
+            if (threads[i].thread && threads[i].running) {
+                rv = apr_thread_join(&thread_rv, threads[i].thread);
                 if (rv != APR_SUCCESS) {
                     ap_log_error(APLOG_MARK, WSGI_LOG_CRIT(rv), wsgi_server,
-                                 "mod_wsgi: Couldn't join with worker thread "
-                                 "%d in daemon process '%s'.", i,
-                                 daemon->group->name);
+                                 "mod_wsgi (pid=%d): Couldn't join with "
+                                 "worker thread %d in daemon process '%s'.",
+                                 getpid(), i, daemon->group->name);
                 }
             }
         }
@@ -5215,7 +5317,11 @@ static int wsgi_start_process(apr_pool_t *p, WSGIDaemonProcess *daemon)
         wsgi_daemon_shutdown = 0;
 
         apr_signal(SIGCHLD, SIG_IGN);
-        apr_signal(SIGTERM, wsgi_signal_handler);
+
+        if (daemon->group->threads == 1) {
+            apr_signal(SIGINT, wsgi_signal_handler);
+            apr_signal(SIGTERM, wsgi_signal_handler);
+        }
 
         /*
          * Flag whether multiple daemon processes or denoted
