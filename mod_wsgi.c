@@ -65,6 +65,7 @@ typedef int apr_size_t;
 #define apr_pcalloc ap_pcalloc
 typedef time_t apr_time_t;
 #include "http_config.h"
+typedef int apr_lockmech_e;
 #else
 #include "ap_mpm.h"
 #include "ap_compat.h"
@@ -217,6 +218,7 @@ typedef struct {
     apr_array_header_t *alias_list;
 
     const char *socket_prefix;
+    apr_lockmech_e lock_mechanism;
 
     int python_optimize;
     const char *python_executable;
@@ -4744,6 +4746,76 @@ static const char *wsgi_set_socket_prefix(cmd_parms *cmd, void *mconfig,
     return NULL;
 }
 
+static const char wsgi_valid_accept_mutex_string[] =
+    "Valid accept mutex mechanisms for this platform are: default"
+#if APR_HAS_FLOCK_SERIALIZE
+    ", flock"
+#endif
+#if APR_HAS_FCNTL_SERIALIZE
+    ", fcntl"
+#endif
+#if APR_HAS_SYSVSEM_SERIALIZE
+    ", sysvsem"
+#endif
+#if APR_HAS_POSIXSEM_SERIALIZE
+    ", posixsem"
+#endif
+#if APR_HAS_PROC_PTHREAD_SERIALIZE
+    ", pthread"
+#endif
+    ".";
+
+static const char *wsgi_set_accept_mutex(cmd_parms *cmd, void *mconfig,
+                                         const char *arg)
+{
+    const char *error = NULL;
+    WSGIServerConfig *sconfig = NULL;
+
+    error = ap_check_cmd_context(cmd, GLOBAL_ONLY);
+    if (error != NULL)
+        return error;
+
+    sconfig = ap_get_module_config(cmd->server->module_config, &wsgi_module);
+
+    sconfig->lock_mechanism = ap_accept_lock_mech;
+
+    if (!strcasecmp(arg, "default")) {
+        sconfig->lock_mechanism = APR_LOCK_DEFAULT;
+    }
+#if APR_HAS_FLOCK_SERIALIZE
+    else if (!strcasecmp(arg, "flock")) {
+        sconfig->lock_mechanism = APR_LOCK_FLOCK;
+    }
+#endif
+#if APR_HAS_FCNTL_SERIALIZE
+    else if (!strcasecmp(arg, "fcntl")) {
+        sconfig->lock_mechanism = APR_LOCK_FCNTL;
+    }
+#endif
+#if APR_HAS_SYSVSEM_SERIALIZE && !defined(PERCHILD_MPM)
+    else if (!strcasecmp(arg, "sysvsem")) {
+        sconfig->lock_mechanism = APR_LOCK_SYSVSEM;
+    }
+#endif
+#if APR_HAS_POSIXSEM_SERIALIZE
+    else if (!strcasecmp(arg, "posixsem")) {
+        sconfig->lock_mechanism = APR_LOCK_POSIXSEM;
+    }
+#endif
+#if APR_HAS_PROC_PTHREAD_SERIALIZE
+    else if (!strcasecmp(arg, "pthread")) {
+        sconfig->lock_mechanism = APR_LOCK_PROC_PTHREAD;
+    }
+#endif
+    else {
+        return apr_pstrcat(cmd->pool, "Accept mutex lock mechanism '", arg,
+                           "' is invalid. ", wsgi_valid_accept_mutex_string,
+                           NULL);
+    }
+
+    return NULL;
+}
+
 static void wsgi_signal_handler(int signum)
 {
     wsgi_daemon_shutdown++;
@@ -5569,13 +5641,14 @@ static int wsgi_start_daemons(apr_pool_t *p)
                                              ap_my_generation, entry->id);
 
             status = apr_proc_mutex_create(&entry->mutex, entry->mutex_path,
-                                           ap_accept_lock_mech, p);
+                                           wsgi_server_config->lock_mechanism,
+                                           p);
 
             if (status != APR_SUCCESS) {
                 ap_log_error(APLOG_MARK, WSGI_LOG_CRIT(errno), wsgi_server,
                              "mod_wsgi (pid=%d): Couldn't create accept "
                              "lock '%s' (%d).", getpid(), entry->mutex_path,
-                             ap_accept_lock_mech);
+                             wsgi_server_config->lock_mechanism);
                 return DECLINED;
             }
 
@@ -6514,6 +6587,8 @@ static const command_rec wsgi_commands[] =
         RSRC_CONF, "Specify details of daemon processes to start."),
     AP_INIT_TAKE1("WSGISocketPrefix", wsgi_set_socket_prefix, NULL,
         RSRC_CONF, "Path prefix for the daemon process sockets."),
+    AP_INIT_TAKE1("WSGIAcceptMutex", wsgi_set_accept_mutex, NULL,
+        RSRC_CONF, "Set accept mutex type for daemon processes."),
 #endif
 
     AP_INIT_TAKE1("WSGIPythonOptimize", wsgi_set_python_optimize, NULL,
