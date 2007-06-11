@@ -5931,6 +5931,12 @@ static int wsgi_execute_remote(request_rec *r)
                                                  daemon->name,
                                                  APR_HASH_KEY_STRING);
 
+        /*
+         * Only allow the process group to match against a daemon
+         * process defined within a virtual host with the same server
+         * name or a daemon process defined at global server scope.
+         */
+
         if (entry) {
             if (entry->server != r->server && entry->server != wsgi_server) {
                 if (strcmp(entry->server->server_hostname,
