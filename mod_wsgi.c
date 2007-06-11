@@ -717,6 +717,7 @@ typedef struct {
         request_rec *r;
         int level;
         char *s;
+        int expired;
 } LogObject;
 
 static PyTypeObject Log_Type;
@@ -732,6 +733,7 @@ static LogObject *newLogObject(request_rec *r, int level)
     self->r = r;
     self->level = APLOG_NOERRNO|level;
     self->s = NULL;
+    self->expired = 0;
 
     return self;
 }
@@ -756,6 +758,11 @@ static void Log_dealloc(LogObject *self)
 
 static PyObject *Log_flush(LogObject *self, PyObject *args)
 {
+    if (self->expired) {
+        PyErr_SetString(PyExc_RuntimeError, "log object has expired");
+        return NULL;
+    }
+
     if (!PyArg_ParseTuple(args, ":flush"))
         return NULL;
 
@@ -871,6 +878,11 @@ static PyObject *Log_write(LogObject *self, PyObject *args)
 {
     const char *msg = NULL;
 
+    if (self->expired) {
+        PyErr_SetString(PyExc_RuntimeError, "log object has expired");
+        return NULL;
+    }
+
     if (!PyArg_ParseTuple(args, "s:write", &msg))
         return NULL;
 
@@ -886,6 +898,11 @@ static PyObject *Log_writelines(LogObject *self, PyObject *args)
     PyObject *iterator = NULL;
     PyObject *item = NULL;
     const char *msg = NULL;
+
+    if (self->expired) {
+        PyErr_SetString(PyExc_RuntimeError, "log object has expired");
+        return NULL;
+    }
 
     if (!PyArg_ParseTuple(args, "O:writelines", &sequence))
         return NULL;
@@ -3441,7 +3458,7 @@ static int wsgi_execute_script(request_rec *r)
 
                 adapter->r = NULL;
                 adapter->input->r = NULL;
-                adapter->log->r = NULL;
+                adapter->log->expired = 1;
             }
 
             Py_XDECREF((PyObject *)adapter);
