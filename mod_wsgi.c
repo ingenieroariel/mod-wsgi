@@ -4523,6 +4523,8 @@ typedef struct {
     int processes;
     int multiprocess;
     int threads;
+    int umask;
+    const char *home;
     const char *socket;
     int listener_fd;
     const char* mutex_path;
@@ -4570,6 +4572,9 @@ static const char *wsgi_add_daemon_process(cmd_parms *cmd, void *mconfig,
     int processes = 1;
     int multiprocess = 0;
     int threads = 15;
+    int umask = -1;
+
+    const char *home = NULL;
 
     uid_t uid = unixd_config.user_id;
     uid_t gid = unixd_config.group_id;
@@ -4637,6 +4642,24 @@ static const char *wsgi_add_daemon_process(cmd_parms *cmd, void *mconfig,
             if (threads < 1)
                 return "Invalid thread count for WSGI daemon process.";
         }
+        else if (strstr(option, "umask=") == option) {
+            value = option + 6;
+            if (!*value)
+                return "Invalid umask for WSGI daemon process.";
+
+            errno = 0;
+            umask = strtol(value, (char **)&value, 7);
+
+            if (*value || errno == ERANGE || umask < 0)
+                return "Invalid umask for WSGI daemon process.";
+        }
+        else if (strstr(option, "home=") == option) {
+            value = option + 5;
+            if (*value != '/')
+                return "Invalid home directory for WSGI daemon process.";
+
+            home = value;
+        }
         else
             return "Invalid option to WSGI daemon process definition.";
     }
@@ -4673,6 +4696,9 @@ static const char *wsgi_add_daemon_process(cmd_parms *cmd, void *mconfig,
     entry->processes = processes;
     entry->multiprocess = multiprocess;
     entry->threads = threads;
+
+    entry->umask = umask;
+    entry->home = home;
 
     return NULL;
 }
@@ -4829,6 +4855,21 @@ static void wsgi_manage_process(int reason, void *data, apr_wait_t status)
 
 static void wsgi_setup_access(WSGIDaemonProcess *daemon)
 {
+    /* Setup the umask for the effective user. */
+
+    if (daemon->group->umask != -1)
+        umask(daemon->group->umask);
+
+    /* Setup the working directory.*/
+
+    if (daemon->group->home) {
+        if (chdir(daemon->group->home) == -1) {
+            ap_log_error(APLOG_MARK, WSGI_LOG_ALERT(errno), wsgi_server,
+                         "mod_wsgi (pid=%d): Unable to change working "
+                         "directory to '%s'.", getpid(), daemon->group->home);
+        }
+    }
+
     /* Don't bother switch user/group if not root. */
 
     if (geteuid())
@@ -5280,7 +5321,7 @@ static int wsgi_start_process(apr_pool_t *p, WSGIDaemonProcess *daemon)
         }
 #endif
 
-        /* Setup daemon process user/group access. */
+        /* Setup daemon process user/group/umask etc. */
 
         wsgi_setup_access(daemon);
 
