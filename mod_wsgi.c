@@ -4533,6 +4533,7 @@ module MODULE_VAR_EXPORT wsgi_module = {
 
 typedef struct {
     server_rec *server;
+    long random;
     int id;
     const char *name;
     const char *user;
@@ -4575,6 +4576,8 @@ static apr_pool_t *wsgi_daemon_pool = NULL;
 static int wsgi_daemon_count = 0;
 static apr_hash_t *wsgi_daemon_index = NULL;
 static apr_hash_t *wsgi_daemon_listeners = NULL;
+
+static WSGIDaemonProcess *wsgi_daemon_process = NULL;
 
 static int wsgi_daemon_shutdown = 0;
 
@@ -4703,6 +4706,7 @@ static const char *wsgi_add_daemon_process(cmd_parms *cmd, void *mconfig,
 
     entry->server = cmd->server;
 
+    entry->random = random();
     entry->id = wsgi_daemon_count;
 
     entry->name = apr_pstrdup(cmd->pool, name);
@@ -5545,6 +5549,10 @@ static int wsgi_start_process(apr_pool_t *p, WSGIDaemonProcess *daemon)
 
         wsgi_server = daemon->group->server;
 
+        /* Retain a reference to daemon process details. */
+
+        wsgi_daemon_process = daemon;
+
         /* Create socket wrapper for listener file descriptor. */
 
         apr_os_sock_put(&daemon->listener, &daemon->group->listener_fd, p);
@@ -5938,6 +5946,8 @@ static int wsgi_execute_remote(request_rec *r)
          */
 
         if (entry) {
+            char const *hash = NULL;
+
             if (entry->server != r->server && entry->server != wsgi_server) {
                 if (strcmp(entry->server->server_hostname,
                            r->server->server_hostname) != 0) {
@@ -5951,6 +5961,18 @@ static int wsgi_execute_remote(request_rec *r)
             }
 
             daemon->socket = entry->socket;
+
+            /*
+             * Add magic marker into request environment so that
+             * daemon process can verify that request is from a
+             * sender that can be trusted.
+             */
+
+            hash = apr_psprintf(r->pool, "%ld|%s|%s", entry->random,
+                                entry->socket, r->filename);
+            hash = ap_md5(r->pool, (const unsigned char *)hash);
+
+            apr_table_setn(r->subprocess_env, "mod_wsgi.magic", hash);
         }
     }
 
@@ -6272,6 +6294,9 @@ static int wsgi_hook_daemon_handler(conn_rec *c)
     char *key;
     apr_sockaddr_t *addr;
 
+    char const *magic;
+    char const *hash;
+
     WSGIRequestConfig *config;
 
     apr_bucket *e;
@@ -6360,6 +6385,37 @@ static int wsgi_hook_daemon_handler(conn_rec *c)
     r->filename = (char *)apr_table_get(r->subprocess_env, "SCRIPT_FILENAME");
 
     apr_stat(&r->finfo, r->filename, APR_FINFO_SIZE, r->pool);
+
+    /* Check magic marker used to validate origin of request. */
+
+    magic = apr_table_get(r->subprocess_env, "mod_wsgi.magic");
+
+    if (!magic) {
+        ap_log_rerror(APLOG_MARK, WSGI_LOG_ALERT(rv), r,
+                     "mod_wsgi (pid=%d): Request origin could not be "
+                     "validated.", getpid());
+
+        apr_pool_destroy(p);
+
+        return HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    hash = apr_psprintf(r->pool, "%ld|%s|%s",
+                        wsgi_daemon_process->group->random,
+                        wsgi_daemon_process->group->socket, r->filename);
+    hash = ap_md5(r->pool, (const unsigned char *)hash);
+
+    if (strcmp(magic, hash) != 0) {
+        ap_log_rerror(APLOG_MARK, WSGI_LOG_ALERT(rv), r,
+                     "mod_wsgi (pid=%d): Request origin could not be "
+                     "validated.", getpid());
+
+        apr_pool_destroy(p);
+
+        return HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    apr_table_unset(r->subprocess_env, "mod_wsgi.magic");
 
     /*
      * Trigger mapping of host information to server configuration
