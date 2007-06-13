@@ -47,6 +47,7 @@ typedef int apr_status_t;
 typedef pool apr_pool_t;
 typedef unsigned int apr_port_t;
 #include "ap_alloc.h"
+#define apr_table_make ap_make_table
 #define apr_table_get ap_table_get
 #define apr_table_set ap_table_set
 #define apr_table_setn ap_table_setn
@@ -56,6 +57,7 @@ typedef unsigned int apr_port_t;
 #define apr_array_cat ap_array_cat
 #define apr_array_append ap_append_arrays
 typedef array_header apr_array_header_t;
+typedef table apr_table_t;
 typedef table_entry apr_table_entry_t;
 typedef int apr_size_t;
 #define apr_psprintf ap_psprintf
@@ -229,6 +231,8 @@ typedef struct {
     int restrict_stdout;
     int restrict_signal;
 
+    apr_table_t *restrict_process;
+
     const char *process_group;
     const char *application_group;
     const char *callable_object;
@@ -268,6 +272,8 @@ static WSGIServerConfig *newWSGIServerConfig(apr_pool_t *p)
     object->restrict_stdin = -1;
     object->restrict_stdout = -1;
     object->restrict_signal = -1;
+
+    object->restrict_process = NULL;
 
     object->process_group = NULL;
     object->application_group = NULL;
@@ -315,6 +321,11 @@ static void *wsgi_merge_server_config(apr_pool_t *p, void *base_conf,
         apr_array_cat(config->alias_list, parent->alias_list);
     }
 
+    if (child->restrict_process)
+        config->restrict_process = child->restrict_process;
+    else
+        config->restrict_process = parent->restrict_process;
+
     if (child->process_group)
         config->process_group = child->process_group;
     else
@@ -355,6 +366,8 @@ static void *wsgi_merge_server_config(apr_pool_t *p, void *base_conf,
 
 typedef struct {
     apr_pool_t *pool;
+
+    apr_table_t *restrict_process;
 
     const char *process_group;
     const char *application_group;
@@ -407,6 +420,11 @@ static void *wsgi_merge_dir_config(apr_pool_t *p, void *base_conf,
     parent = (WSGIDirectoryConfig *)base_conf;
     child = (WSGIDirectoryConfig *)new_conf;
 
+    if (child->restrict_process)
+        config->restrict_process = child->restrict_process;
+    else
+        config->restrict_process = parent->restrict_process;
+
     if (child->process_group)
         config->process_group = child->process_group;
     else
@@ -447,6 +465,8 @@ static void *wsgi_merge_dir_config(apr_pool_t *p, void *base_conf,
 
 typedef struct {
     apr_pool_t *pool;
+
+    apr_table_t *restrict_process;
 
     const char *process_group;
     const char *application_group;
@@ -654,6 +674,11 @@ static WSGIRequestConfig *wsgi_create_req_config(apr_pool_t *p, request_rec *r)
     sconfig = ap_get_module_config(r->server->module_config, &wsgi_module);
 
     config->pool = p;
+
+    config->restrict_process = dconfig->restrict_process;
+
+    if (!config->restrict_process)
+        config->restrict_process = sconfig->restrict_process;
 
     config->process_group = dconfig->process_group;
 
@@ -3815,6 +3840,39 @@ static const char *wsgi_set_restrict_signal(cmd_parms *cmd, void *mconfig,
     return NULL;
 }
 
+static const char *wsgi_set_restrict_process(cmd_parms *cmd, void *mconfig,
+                                             const char *args)
+{
+    apr_table_t *index = apr_table_make(cmd->pool, 5);
+
+    if (cmd->path) {
+        WSGIDirectoryConfig *dconfig = NULL;
+        dconfig = (WSGIDirectoryConfig *)mconfig;
+
+        dconfig->restrict_process = index;
+    }
+    else {
+        WSGIServerConfig *sconfig = NULL;
+        sconfig = ap_get_module_config(cmd->server->module_config,
+                                       &wsgi_module);
+
+        sconfig->restrict_process = index;
+    }
+
+    while (*args) {
+        char const *option;
+
+        option = ap_getword_conf(cmd->temp_pool, &args);
+
+        if (!strcmp(option, "%{GLOBAL}"))
+            option = "";
+
+        apr_table_setn(index, option, option);
+    }
+
+    return NULL;
+}
+
 static const char *wsgi_set_process_group(cmd_parms *cmd, void *mconfig,
                                           const char *n)
 {
@@ -4361,8 +4419,10 @@ static int wsgi_hook_handler(request_rec *r)
      */
 
 #if AP_SERVER_MAJORVERSION_NUMBER >= 2
-    if (*config->process_group)
-        return wsgi_execute_remote(r);
+    status = wsgi_execute_remote(r);
+
+    if (status != DECLINED)
+        return status;
 #endif
 
     return wsgi_execute_script(r);
@@ -5910,6 +5970,9 @@ static int wsgi_execute_remote(request_rec *r)
 {
     WSGIRequestConfig *config = NULL;
     WSGIDaemonSocket *daemon = NULL;
+    WSGIProcessGroup *group = NULL;
+
+    char const *hash = NULL;
 
     int status;
     apr_status_t rv;
@@ -5925,66 +5988,91 @@ static int wsgi_execute_remote(request_rec *r)
     config = (WSGIRequestConfig *)ap_get_module_config(r->request_config,
                                                        &wsgi_module);
 
-    /* Find socket path for target daemon process. */
+    /*
+     * Only allow the process group to match against a restricted
+     * set of processes if such a restricted set has been defined.
+     */
+
+    if (config->restrict_process) {
+        if (!apr_table_get(config->restrict_process,
+                           config->process_group)) {
+            wsgi_log_script_error(r, apr_psprintf(r->pool, "Daemon "
+                                  "process called '%s' cannot be "
+                                  "accessed by this WSGI application",
+                                  config->process_group), r->filename);
+
+            return HTTP_INTERNAL_SERVER_ERROR;
+        }
+    }
+
+    /*
+     * Do not process request as remote if actually targeted at
+     * the main Apache processes.
+     */
+
+    if (!*config->process_group)
+        return DECLINED;
+
+    /* Grab details of matching process group. */
+
+    if (!wsgi_daemon_index) {
+        wsgi_log_script_error(r, apr_psprintf(r->pool, "No WSGI daemon "
+                              "process called '%s' has been configured",
+                              config->process_group), r->filename);
+
+        return HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    group = (WSGIProcessGroup *)apr_hash_get(wsgi_daemon_index,
+                                             config->process_group,
+                                             APR_HASH_KEY_STRING);
+
+    if (!group) {
+        wsgi_log_script_error(r, apr_psprintf(r->pool, "No WSGI daemon "
+                              "process called '%s' has been configured",
+                              config->process_group), r->filename);
+
+        return HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    /*
+     * Only allow the process group to match against a daemon
+     * process defined within a virtual host with the same
+     * server name or a daemon process defined at global server
+     * scope.
+     */
+
+    if (group->server != r->server && group->server != wsgi_server) {
+        if (strcmp(group->server->server_hostname,
+                   r->server->server_hostname) != 0) {
+            wsgi_log_script_error(r, apr_psprintf(r->pool, "Daemon "
+                                  "process called '%s' cannot be "
+                                  "accessed by this WSGI application",
+                                  config->process_group), r->filename);
+
+            return HTTP_INTERNAL_SERVER_ERROR;
+        }
+    }
+
+    /*
+     * Add magic marker into request environment so that daemon
+     * process can verify that request is from a sender that can
+     * be trusted.
+     */
+
+    hash = apr_psprintf(r->pool, "%ld|%s|%s", group->random,
+                        group->socket, r->filename);
+    hash = ap_md5(r->pool, (const unsigned char *)hash);
+
+    apr_table_setn(r->subprocess_env, "mod_wsgi.magic", hash);
+
+    /* Create connection to the daemon process. */
 
     daemon = (WSGIDaemonSocket *)apr_pcalloc(r->pool,
                                              sizeof(WSGIDaemonSocket));
 
     daemon->name = config->process_group;
-
-    if (wsgi_daemon_index) {
-        WSGIProcessGroup *entry = NULL;
-
-        entry = (WSGIProcessGroup *)apr_hash_get(wsgi_daemon_index,
-                                                 daemon->name,
-                                                 APR_HASH_KEY_STRING);
-
-        /*
-         * Only allow the process group to match against a daemon
-         * process defined within a virtual host with the same server
-         * name or a daemon process defined at global server scope.
-         */
-
-        if (entry) {
-            char const *hash = NULL;
-
-            if (entry->server != r->server && entry->server != wsgi_server) {
-                if (strcmp(entry->server->server_hostname,
-                           r->server->server_hostname) != 0) {
-                    wsgi_log_script_error(r, apr_psprintf(r->pool, "Daemon "
-                                          "process called '%s' cannot be "
-                                          "accessed by this WSGI application",
-                                          daemon->name), r->filename);
-
-                    return HTTP_INTERNAL_SERVER_ERROR;
-                }
-            }
-
-            daemon->socket = entry->socket;
-
-            /*
-             * Add magic marker into request environment so that
-             * daemon process can verify that request is from a
-             * sender that can be trusted.
-             */
-
-            hash = apr_psprintf(r->pool, "%ld|%s|%s", entry->random,
-                                entry->socket, r->filename);
-            hash = ap_md5(r->pool, (const unsigned char *)hash);
-
-            apr_table_setn(r->subprocess_env, "mod_wsgi.magic", hash);
-        }
-    }
-
-    if (!daemon->socket) {
-        wsgi_log_script_error(r, apr_psprintf(r->pool, "No WSGI daemon "
-                              "process called '%s' has been configured",
-                              daemon->name), r->filename);
-
-        return HTTP_INTERNAL_SERVER_ERROR;
-    }
-
-    /* Create connection to the daemon process. */
+    daemon->socket = group->socket;
 
     if ((status = wsgi_connect_daemon(r, daemon)) != OK)
         return status;
@@ -6672,6 +6760,8 @@ static const command_rec wsgi_commands[] =
         RSRC_CONF, "Enable/Disable restrictions on use of signal()."),
 
 #if defined(MOD_WSGI_WITH_DAEMONS)
+    AP_INIT_RAW_ARGS("WSGIRestrictProcess", wsgi_set_restrict_process, NULL,
+        ACCESS_CONF|RSRC_CONF, "Limit selectable WSGI process groups."),
     AP_INIT_TAKE1("WSGIProcessGroup", wsgi_set_process_group, NULL,
         ACCESS_CONF|RSRC_CONF, "Name of the WSGI process group."),
 #endif
