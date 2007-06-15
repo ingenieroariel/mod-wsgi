@@ -536,8 +536,12 @@ static const char *wsgi_process_group(request_rec *r, const char *s)
                 if (!value)
                     value = getenv(name);
 
-                if (value)
+                if (value) {
+                    if (*value == '%' && strstr(value, "%{ENV:") != value)
+                        return wsgi_process_group(r, value);
+
                     return value;
+                }
             }
         }
     }
@@ -612,8 +616,12 @@ static const char *wsgi_application_group(request_rec *r, const char *s)
                 if (!value)
                     value = getenv(name);
 
-                if (value)
+                if (value) {
+                    if (*value == '%' && strstr(value, "%{ENV:") != value)
+                        return wsgi_application_group(r, value);
+
                     return value;
+                }
             }
         }
     }
