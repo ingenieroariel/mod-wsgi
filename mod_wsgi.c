@@ -480,11 +480,11 @@ typedef struct {
 
 static const char *wsgi_script_name(request_rec *r)
 {
-    const char *script_name = NULL;
+    char *script_name = NULL;
     int path_info_start = 0;
 
     if (!r->path_info || !*r->path_info) {
-        script_name = r->uri;
+        script_name = apr_pstrdup(r->pool, r->uri);
     }
     else {
         path_info_start = ap_find_path_info(r->uri, r->path_info);
@@ -498,6 +498,8 @@ static const char *wsgi_script_name(request_rec *r)
         script_name = apr_pstrdup(r->pool, script_name);
         ap_no2slash((char*)script_name);
     }
+
+    ap_str_tolower(script_name);
 
     return script_name;
 }
