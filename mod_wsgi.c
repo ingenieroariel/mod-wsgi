@@ -241,6 +241,7 @@ typedef struct {
     int script_reloading;
     int reload_mechanism;
     int output_buffering;
+    int case_sensitivity;
 } WSGIServerConfig;
 
 static WSGIServerConfig *wsgi_server_config = NULL;
@@ -283,6 +284,7 @@ static WSGIServerConfig *newWSGIServerConfig(apr_pool_t *p)
     object->script_reloading = -1;
     object->reload_mechanism = -1;
     object->output_buffering = -1;
+    object->case_sensitivity = -1;
 
     return object;
 }
@@ -361,6 +363,11 @@ static void *wsgi_merge_server_config(apr_pool_t *p, void *base_conf,
     else
         config->output_buffering = parent->output_buffering;
 
+    if (child->case_sensitivity != -1)
+        config->case_sensitivity = child->case_sensitivity;
+    else
+        config->case_sensitivity = parent->case_sensitivity;
+
     return config;
 }
 
@@ -377,6 +384,7 @@ typedef struct {
     int script_reloading;
     int reload_mechanism;
     int output_buffering;
+    int case_sensitivity;
 } WSGIDirectoryConfig;
 
 static WSGIDirectoryConfig *newWSGIDirectoryConfig(apr_pool_t *p)
@@ -395,6 +403,7 @@ static WSGIDirectoryConfig *newWSGIDirectoryConfig(apr_pool_t *p)
     object->script_reloading = -1;
     object->reload_mechanism = -1;
     object->output_buffering = -1;
+    object->case_sensitivity = -1;
 
     return object;
 }
@@ -460,6 +469,11 @@ static void *wsgi_merge_dir_config(apr_pool_t *p, void *base_conf,
     else
         config->output_buffering = parent->output_buffering;
 
+    if (child->case_sensitivity != -1)
+        config->case_sensitivity = child->case_sensitivity;
+    else
+        config->case_sensitivity = parent->case_sensitivity;
+
     return config;
 }
 
@@ -476,6 +490,7 @@ typedef struct {
     int script_reloading;
     int reload_mechanism;
     int output_buffering;
+    int case_sensitivity;
 } WSGIRequestConfig;
 
 static const char *wsgi_script_name(request_rec *r)
@@ -742,6 +757,19 @@ static WSGIRequestConfig *wsgi_create_req_config(apr_pool_t *p, request_rec *r)
         config->output_buffering = sconfig->output_buffering;
         if (config->output_buffering < 0)
             config->output_buffering = 0;
+    }
+
+    config->case_sensitivity = dconfig->case_sensitivity;
+
+    if (config->case_sensitivity < 0) {
+        config->case_sensitivity = sconfig->case_sensitivity;
+        if (config->case_sensitivity < 0) {
+#if defined(WIN32) || defined(DARWIN)
+            config->case_sensitivity = 0;
+#else
+            config->case_sensitivity = 1;
+#endif
+        }
     }
 
     return config;
@@ -3298,15 +3326,34 @@ static int wsgi_reload_required(request_rec *r, PyObject *module)
 
 static char *wsgi_module_name(request_rec *r)
 {
+    WSGIRequestConfig *config = NULL;
+
     char *hash = NULL;
+    char *file = NULL;
+
+    /* Grab request configuration. */
+
+    config = (WSGIRequestConfig *)ap_get_module_config(r->request_config,
+                                                       &wsgi_module);
 
     /*
      * Calculate a name for the module using the MD5 of its full
      * pathname. This is so that different code files with the
-     * same basename are still considered unique.
+     * same basename are still considered unique. Note that where
+     * we believe a case insensitive file system is being used,
+     * we always change the file name to lower case so that use
+     * of different case in name doesn't resultant in duplicate
+     * modules being loaded for the same file.
      */
 
-    hash = ap_md5(r->pool, (const unsigned char *)r->filename);
+    file = r->filename;
+
+    if (!config->case_sensitivity) {
+        file = apr_pstrdup(r->pool, file);
+        ap_str_tolower(file);
+    }
+
+    hash = ap_md5(r->pool, (const unsigned char *)file);
     return apr_pstrcat(r->pool, "_mod_wsgi_", hash, NULL);
 }
 
@@ -4057,6 +4104,40 @@ static const char *wsgi_set_output_buffering(cmd_parms *cmd, void *mconfig,
     return NULL;
 }
 
+static const char *wsgi_set_case_sensitivity(cmd_parms *cmd, void *mconfig,
+                                           const char *f)
+{
+    if (cmd->path) {
+        WSGIDirectoryConfig *dconfig = NULL;
+        dconfig = (WSGIDirectoryConfig *)mconfig;
+
+        if (strcasecmp(f, "Off") == 0)
+            dconfig->case_sensitivity = 0;
+        else if (strcasecmp(f, "On") == 0)
+            dconfig->case_sensitivity = 1;
+        else if (strcasecmp(f, "Default") == 0)
+            dconfig->case_sensitivity = -1;
+        else
+            return "WSGICaseSensitivity must be one of: Default | Off | On";
+    }
+    else {
+        WSGIServerConfig *sconfig = NULL;
+        sconfig = ap_get_module_config(cmd->server->module_config,
+                                       &wsgi_module);
+
+        if (strcasecmp(f, "Off") == 0)
+            sconfig->case_sensitivity = 0;
+        else if (strcasecmp(f, "On") == 0)
+            sconfig->case_sensitivity = 1;
+        else if (strcasecmp(f, "Default") == 0)
+            sconfig->case_sensitivity = -1;
+        else
+            return "WSGICaseSensitivity must be one of: Default | Off | On";
+    }
+
+    return NULL;
+}
+
 /* Handler for the translate name phase. */
 
 static int wsgi_alias_matches(const char *uri, const char *alias_fakename)
@@ -4295,6 +4376,8 @@ static void wsgi_build_environment(request_rec *r)
                    apr_psprintf(r->pool, "%d", config->reload_mechanism));
     apr_table_setn(r->subprocess_env, "mod_wsgi.output_buffering",
                    apr_psprintf(r->pool, "%d", config->output_buffering));
+    apr_table_setn(r->subprocess_env, "mod_wsgi.case_sensitivity",
+                   apr_psprintf(r->pool, "%d", config->case_sensitivity));
 
 #if defined(MOD_WSGI_WITH_DAEMONS)
     apr_table_setn(r->subprocess_env, "mod_wsgi.listener_host",
@@ -4527,6 +4610,8 @@ static const command_rec wsgi_commands[] =
         OR_FILEINFO, TAKE1, "Defines what is reloaded when a reload occurs." },
     { "WSGIOutputBuffering", wsgi_set_output_buffering, NULL,
         OR_FILEINFO, TAKE1, "Enable/Disable buffering of response." },
+    { "WSGICaseSensitivity", wsgi_set_case_sensitivity, NULL,
+        OR_FILEINFO, TAKE1, "Define whether file system is case sensitive." },
 
     { NULL }
 };
@@ -6575,6 +6660,8 @@ static int wsgi_hook_daemon_handler(conn_rec *c)
                                                   "mod_wsgi.reload_mechanism"));
     config->output_buffering = atoi(apr_table_get(r->subprocess_env,
                                                   "mod_wsgi.output_buffering"));
+    config->case_sensitivity = atoi(apr_table_get(r->subprocess_env,
+                                                  "mod_wsgi.case_sensitivity"));
 
     /*
      * Define how input data is to be processed. This
@@ -6789,6 +6876,8 @@ static const command_rec wsgi_commands[] =
         OR_FILEINFO, "Defines what is reloaded when a reload occurs."),
     AP_INIT_TAKE1("WSGIOutputBuffering", wsgi_set_output_buffering, NULL,
         OR_FILEINFO, "Enable/Disable buffering of response."),
+    AP_INIT_TAKE1("WSGICaseSensitivity", wsgi_set_case_sensitivity, NULL,
+        OR_FILEINFO, "Define whether file system is case sensitive."),
 
     { NULL }
 };
