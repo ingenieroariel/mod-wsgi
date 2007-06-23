@@ -1,0 +1,14 @@
+===============================
+Welcome to the MOD_WSGI project
+===============================
+
+Copyright 2007 GRAHAM DUMPLETON
+
+In order to have got here you must have checked out all code for the
+mod_wsgi project from the trunk of the mod_wsgi source code repository.
+
+At present the only code which has been made publically available is the
+mod_wsgi adapter module for Apache. Over time other companion products
+will however be added. These extra products will provide additional
+features for using Python in conjunction with Apache, enabling you to
+make even more powerful web applications using the Apache web server.
