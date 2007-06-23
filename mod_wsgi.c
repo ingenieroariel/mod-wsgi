@@ -4115,10 +4115,8 @@ static const char *wsgi_set_case_sensitivity(cmd_parms *cmd, void *mconfig,
             dconfig->case_sensitivity = 0;
         else if (strcasecmp(f, "On") == 0)
             dconfig->case_sensitivity = 1;
-        else if (strcasecmp(f, "Default") == 0)
-            dconfig->case_sensitivity = -1;
         else
-            return "WSGICaseSensitivity must be one of: Default | Off | On";
+            return "WSGICaseSensitivity must be one of: Off | On";
     }
     else {
         WSGIServerConfig *sconfig = NULL;
@@ -4129,10 +4127,8 @@ static const char *wsgi_set_case_sensitivity(cmd_parms *cmd, void *mconfig,
             sconfig->case_sensitivity = 0;
         else if (strcasecmp(f, "On") == 0)
             sconfig->case_sensitivity = 1;
-        else if (strcasecmp(f, "Default") == 0)
-            sconfig->case_sensitivity = -1;
         else
-            return "WSGICaseSensitivity must be one of: Default | Off | On";
+            return "WSGICaseSensitivity must be one of: Off | On";
     }
 
     return NULL;
