@@ -1,0 +1,141 @@
+import os, sys, popen2, glob
+
+apxs = '@APXS@'
+swig = '@SWIG@'
+
+# Determine Apache version.
+
+version = None
+
+output = popen2.popen2(apxs + ' -q SBINDIR')[0].read()
+sbindir = output.strip()
+
+output = popen2.popen2(apxs + ' -q TARGET')[0].read()
+target = output.strip()
+
+httpd = os.path.join(sbindir, target)
+
+if not version:
+    output = popen2.popen2(httpd + ' -v')[0].readlines()
+    for line in output:
+        if line.find('version') != -1:
+          version = '.'.join(line.split('/')[1].split()[0].split('.')[:2])
+
+# Use apxs to determine additional compiler flags.
+
+flags = []
+
+output = popen2.popen2(apxs + ' -q CFLAGS')[0].read()
+flags += filter(lambda x: x.startswith('-D'), output.split())
+
+output = popen2.popen2(apxs + ' -q CFLAGS_SHLIB')[0].read()
+flags += filter(lambda x: x.startswith('-D'), output.split())
+
+output = popen2.popen2(apxs + ' -q INCLUDEDIR')[0].read()
+includedir = output.strip()
+flags += [ '-I%s' % includedir ]
+
+os.environ['CPPFLAGS'] = ' '.join(flags)
+
+# When using Python to process SWIG files, dependencies between
+# SWIG files aren't checked, thus force update of most top level
+# SWIG files when children have changed.
+
+for file in glob.glob('apache/*/*.i'):
+    name = os.path.split(file)[1]
+    child = os.path.join('apache', '_' + name)
+    if os.path.exists(child):
+        if os.path.getmtime(child) > os.path.getmtime(file):
+            os.utime(file, None)
+
+# Now use distutils to actually compile the code and create the
+# loadable module. Note that SWIG functionality in Python 2.3 is
+# somewhat broken in that you can't define where SWIG is located
+# or additional options to use. To get around the SWIG problems
+# we monkey patch the distutils code to get around problems.
+
+from distutils import core, sysconfig
+from distutils.command import build_ext
+
+sysconfig._config_vars["OPT"] = \
+        sysconfig.get_config_var("OPT").replace(" -g ", " ")
+
+swig_opts = [ '-threads', '-I%s' % includedir ]
+
+def swig_sources(self, sources):
+
+    """Walk the list of source files in 'sources', looking for SWIG
+    interface (.i) files.  Run SWIG on all that are found, and
+    return a modified 'sources' list with SWIG source files replaced
+    by the generated C (or C++) files.
+    """
+
+    new_sources = []
+    swig_sources = []
+    swig_targets = {}
+
+    # XXX this drops generated C/C++ files into the source tree, which
+    # is fine for developers who want to distribute the generated
+    # source -- but there should be an option to put SWIG output in
+    # the temp dir.
+
+    if self.swig_cpp:
+        target_ext = '.cpp'
+    else:
+        target_ext = '.c'
+
+    for source in sources:
+        (base, ext) = os.path.splitext(source)
+        if ext == ".i":             # SWIG interface file
+            new_sources.append(base + '_wrap' + target_ext)
+            swig_sources.append(source)
+            swig_targets[source] = new_sources[-1]
+        else:
+            new_sources.append(source)
+
+    if not swig_sources:
+        return new_sources
+
+    swig_cmd = [swig, "-python"]
+    swig_cmd.extend(swig_opts)
+    if self.swig_cpp:
+        swig_cmd.append("-c++")
+
+    for source in swig_sources:
+        target = swig_targets[source]
+        build_ext.log.info("swigging %s to %s", source, target)
+        self.spawn(swig_cmd + ["-o", target, source])
+
+    return new_sources
+
+if sys.version_info[:2] in [(2,3)]:
+    build_ext.build_ext.swig_sources = swig_sources
+
+extensions = []
+
+packages = [ 'apache' ]
+
+apachexy = 'apache%s%s' % tuple(version.split('.'))
+
+packages += [ 'apache.%s' % apachexy ]
+
+for file in glob.glob('apache/%s/*.i' % apachexy):
+    extensions.append(
+        core.Extension(
+            name = file[:-2].replace('/', '.', 1).replace('/', '._'),
+            sources = [file],
+        ),
+    )
+
+if sys.version_info[:2] in [(2,3)]:
+  core.setup(
+      packages = packages,
+      ext_modules = extensions,
+  )
+else:
+  core.setup(
+      packages = packages,
+      ext_modules = extensions,
+      swig = swig,
+      swig_opts = swig_opts,
+  )
