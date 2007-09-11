@@ -1,6 +1,6 @@
 /* vim: set sw=4 expandtab : */
 
-%module(package="mod_grumpy.bindings.apache22") ap_mmn
+%module(package="apache.apache22") ap_mmn
 
 %{
 #include "ap_mmn.h"

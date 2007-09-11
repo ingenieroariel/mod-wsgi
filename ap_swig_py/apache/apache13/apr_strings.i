@@ -6,7 +6,7 @@
  * and which were usable.
  */
 
-%module(package="mod_grumpy.bindings.apache13") apr_strings
+%module(package="apache.apache13") apr_strings
 
 %{
 #include "ap_config.h"

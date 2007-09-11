@@ -1,6 +1,6 @@
 /* vim: set sw=4 expandtab : */
 
-%module(package="mod_grumpy.bindings.apache22") http_protocol
+%module(package="apache.apache22") http_protocol
 
 %{
 #include "http_protocol.h"

@@ -1,6 +1,6 @@
 /* vim: set sw=4 expandtab : */
 
-%module(package="mod_grumpy.bindings.apache13") httpd
+%module(package="apache.apache13") httpd
 
 %{
 #include "httpd.h"

@@ -1,6 +1,6 @@
 /* vim: set sw=4 expandtab : */
 
-%module(package="mod_grumpy.bindings.apache20") apr_errno
+%module(package="apache.apache20") apr_errno
 
 %{
 #include "apr_errno.h"

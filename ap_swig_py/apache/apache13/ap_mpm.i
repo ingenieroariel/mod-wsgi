@@ -1,6 +1,6 @@
 /* vim: set sw=4 expandtab : */
 
-%module(package="mod_grumpy.bindings.apache13") ap_mpm
+%module(package="apache.apache13") ap_mpm
 
 %nodefaultctor;
 %nodefaultdtor;

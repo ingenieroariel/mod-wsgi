@@ -1,6 +1,6 @@
 /* vim: set sw=4 expandtab : */
 
-%module(package="mod_grumpy.bindings.apache22") apr_strings
+%module(package="apache.apache22") apr_strings
 
 %{
 #include "apr_strings.h"

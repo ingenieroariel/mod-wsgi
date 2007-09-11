@@ -1,6 +1,6 @@
 /* vim: set sw=4 expandtab : */
 
-%module(package="mod_grumpy.bindings.apache22") apr_tables
+%module(package="apache.apache22") apr_tables
 
 %{
 #include "apr_tables.h"

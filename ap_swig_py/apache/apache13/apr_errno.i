@@ -6,7 +6,7 @@
  * and which were usable.
  */
 
-%module(package="mod_grumpy.bindings.apache13") apr_errno
+%module(package="apache.apache13") apr_errno
 
 %nodefaultctor;
 %nodefaultdtor;

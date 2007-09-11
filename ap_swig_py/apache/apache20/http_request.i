@@ -1,6 +1,6 @@
 /* vim: set sw=4 expandtab : */
 
-%module(package="mod_grumpy.bindings.apache20") http_request
+%module(package="apache.apache20") http_request
 
 %{
 #include "http_request.h"

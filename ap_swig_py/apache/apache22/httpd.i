@@ -1,6 +1,6 @@
 /* vim: set sw=4 expandtab : */
 
-%module(package="mod_grumpy.bindings.apache22") httpd
+%module(package="apache.apache22") httpd
 
 %{
 #include "apr_strings.h"

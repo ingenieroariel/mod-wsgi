@@ -1,6 +1,6 @@
 /* vim: set sw=4 expandtab : */
 
-%module(package="mod_grumpy.bindings.apache20") http_config
+%module(package="apache.apache20") http_config
 
 %{
 #include "httpd.h"
