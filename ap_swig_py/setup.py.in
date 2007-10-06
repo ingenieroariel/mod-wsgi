@@ -65,7 +65,7 @@ from distutils.command import build_ext
 sysconfig._config_vars["OPT"] = \
         sysconfig.get_config_var("OPT").replace(" -g ", " ")
 
-swig_opts = [ '-threads' ] + filter(lambda x: x.startswith('-I'), flags)
+swig_opts = filter(lambda x: x.startswith('-I'), flags)
 
 def swig_sources(self, sources):
 
