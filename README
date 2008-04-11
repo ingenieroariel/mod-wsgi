@@ -2,7 +2,7 @@
 Welcome to the MOD_WSGI project
 ===============================
 
-Copyright 2007 GRAHAM DUMPLETON
+Copyright 2007-2008 GRAHAM DUMPLETON
 
 In order to have got here you must have checked out all code for the
 mod_wsgi project from the trunk of the mod_wsgi source code repository.
@@ -11,14 +11,6 @@ The sub packages contained within this directory are as follows:
 
 mod_wsgi - The core Apache module for hosting Python WSGI applications
 in conjunction with the Apache web server.
-
-ap_swig_py - SWIG bindings for the internal Apache web server APIs.
-
-Note that the only package you need for hosting Python web applications
-which implement the WSGI interface is the mod_wsgi package. The other
-packages provided here are optional and would only be used by developers
-writing Python web applications which specifically need to interact with
-the Apache web server.
 
 Any official releases of the above packages and corresponding documentation
 can be found at 'http://www.modwsgi.org'.
